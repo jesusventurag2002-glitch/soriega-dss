@@ -1,3 +1,4 @@
+import io
 import os
 import re
 from datetime import datetime
@@ -121,28 +122,51 @@ def parsear_fecha(valor):
     return None
 
 
+MAX_FILAS_TITULO = 5  # filas de título que puede traer el reporte antes de los encabezados
+
+
+def normalizar_columnas(columnas):
+    return pd.Index(columnas).astype(str).str.strip().str.lower()
+
+
 def leer_archivo(archivo, tipo_reporte):
     nombre = archivo.filename.lower()
-    header = 1 if tipo_reporte == 'ventas' else 0
+    contenido = io.BytesIO(archivo.read())
+
     if nombre.endswith('.csv'):
-        df = pd.read_csv(archivo, header=header)
+        def leer(**kwargs):
+            contenido.seek(0)
+            try:
+                return pd.read_csv(contenido, **kwargs)
+            except UnicodeDecodeError:
+                contenido.seek(0)
+                return pd.read_csv(contenido, encoding='latin-1', **kwargs)
     elif nombre.endswith(('.xlsx', '.xls')):
-        df = pd.read_excel(archivo, header=header)
+        # El sistema administrativo exporta .XLS que en realidad son .xlsx;
+        # pandas detecta el formato real por el contenido, no por la extensión.
+        libro = pd.ExcelFile(contenido)
+        leer = libro.parse
     else:
         raise ErrorCarga("Formato no soportado. Usa .xlsx, .xls o .csv.")
 
+    # Los reportes traen un título antes de los encabezados ("Lista De Inventario...",
+    # "Artículos Vendidos..."), así que se busca la fila que contiene las columnas requeridas.
+    requeridas = COLUMNAS_REQUERIDAS['ventas' if tipo_reporte == 'ventas' else 'inventario']
+    for header in range(MAX_FILAS_TITULO + 1):
+        columnas = normalizar_columnas(leer(header=header, nrows=0).columns)
+        if all(any(c in columnas for c in grupo) for grupo in requeridas):
+            break
+    else:
+        faltantes = ', '.join(' / '.join(g) for g in requeridas)
+        raise ErrorCarga(
+            f"No se encontraron las columnas requeridas ({faltantes}) en las primeras "
+            f"{MAX_FILAS_TITULO + 1} filas. Verifica que el archivo corresponda al tipo de reporte seleccionado."
+        )
+
+    df = leer(header=header)
     if df.empty:
         raise ErrorCarga("Archivo vacío o no procesable.")
-
-    df.columns = df.columns.astype(str).str.strip().str.lower()
-
-    clave = 'ventas' if tipo_reporte == 'ventas' else 'inventario'
-    faltantes = [' / '.join(g) for g in COLUMNAS_REQUERIDAS[clave] if not any(c in df.columns for c in g)]
-    if faltantes:
-        raise ErrorCarga(
-            f"Faltan columnas requeridas: {', '.join(faltantes)}. "
-            f"Columnas encontradas (fila {header + 1}): {', '.join(df.columns[:15])}"
-        )
+    df.columns = normalizar_columnas(df.columns)
     return df
 
 

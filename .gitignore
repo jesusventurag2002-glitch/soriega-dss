@@ -7,3 +7,6 @@ __pycache__/
 .venv/
 .env
 *.db
+
+# Archivos de muestra con datos del negocio
+muestras/
