@@ -39,7 +39,7 @@ class Inventario(db.Model):
     __tablename__ = 'inventarios'
     id = db.Column(db.Integer, primary_key=True)
     articulo_codigo = db.Column(db.String(50))
-    origen_inventario = db.Column(db.String(10)) # 'INV' o 'INVAL'
+    origen_inventario = db.Column(db.String(10)) # 'INV' (sucursales) o 'INVAL' (almacén principal)
     existencia = db.Column(db.Integer, default=0)
 
 class TasaInterna(db.Model):

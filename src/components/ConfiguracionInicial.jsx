@@ -5,8 +5,8 @@ import { cargarArchivoInicial } from '../services/api.js';
 
 const TIPOS_REPORTE = [
   { value: 'ventas', label: 'Historial de Ventas' },
-  { value: 'inv_fisico', label: 'Inventario Almacén Principal' },
-  { value: 'inv_inval', label: 'Inventario Sucursales' },
+  { value: 'inv_inval', label: 'Inventario Almacén Principal' },
+  { value: 'inv_fisico', label: 'Inventario Sucursales' },
 ];
 
 function Alerta({ tipo, texto, onCerrar }) {
