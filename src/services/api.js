@@ -1,5 +1,6 @@
-// Backend temporal en Python. Ajustable con VITE_API_URL en un archivo .env.
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5000';
+// Por defecto se usa la misma URL del frontend: el proxy de Vite reenvía /api al backend Flask,
+// lo que permite abrir la app desde otros dispositivos de la red. Ajustable con VITE_API_URL en un .env.
+const API_URL = import.meta.env.VITE_API_URL ?? '';
 
 const ORDEN_ABC = { A: 0, B: 1, C: 2 };
 
