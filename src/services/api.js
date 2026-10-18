@@ -4,7 +4,7 @@ const API_URL = import.meta.env.VITE_API_URL ?? '';
 
 const ORDEN_ABC = { A: 0, B: 1, C: 2 };
 
-// Sugerencias de traslado Almacén Principal (INVAL) -> Sucursal (INV), adaptadas al formato de la vista.
+// Sugerencias de traslado Almacén Principal (INVAL) -> cada sucursal (INV), adaptadas al formato de la vista.
 export async function obtenerTrasladosSugeridos(dias) {
   const respuesta = await fetch(`${API_URL}/api/logistica`, {
     method: 'POST',
@@ -16,12 +16,12 @@ export async function obtenerTrasladosSugeridos(dias) {
 
   return data.resultados
     .map((r) => ({
-      id: r.codigo,
+      id: `${r.codigo}-${r.sucursal}`, // un mismo artículo puede ir a varias sucursales
       codigo: r.codigo,
       descripcion: r.nombre,
       clasificacion_abc: r.clasificacion_abc,
       origen: 'Almacén Principal',
-      destino: 'Sucursal',
+      destino: r.sucursal ?? 'Sucursal',
       stock_origen: r.disponible_almacen,
       stock_destino: r.stock_sucursal,
       cantidad_sugerida: r.cantidad,

@@ -33,6 +33,7 @@ export default function Dashboard({ usuario, onVerVentas }) {
   const [error, setError] = useState(null);
   const [filtro, setFiltro] = useState('todos');
   const [dias, setDias] = useState(15);
+  const [sucursal, setSucursal] = useState('todas');
 
   const cargar = useCallback(async () => {
     setCargando(true);
@@ -57,8 +58,12 @@ export default function Dashboard({ usuario, onVerVentas }) {
   const actualizar = (id, cambios) =>
     setTraslados((prev) => prev.map((t) => (t.id === id ? { ...t, ...cambios } : t)));
 
-  const pendientes = traslados.filter((t) => t.estado === 'pendiente');
-  const visibles = filtro === 'todos' ? traslados : traslados.filter((t) => t.estado === filtro);
+  const sucursales = [...new Set(traslados.map((t) => t.destino))].sort();
+  // Si la sucursal elegida ya no tiene sugerencias tras recalcular, se vuelve a "todas".
+  const sucursalActiva = sucursales.includes(sucursal) ? sucursal : 'todas';
+  const deSucursal = sucursalActiva === 'todas' ? traslados : traslados.filter((t) => t.destino === sucursalActiva);
+  const pendientes = deSucursal.filter((t) => t.estado === 'pendiente');
+  const visibles = filtro === 'todos' ? deSucursal : deSucursal.filter((t) => t.estado === filtro);
 
   return (
     <div className="space-y-6">
@@ -115,7 +120,8 @@ export default function Dashboard({ usuario, onVerVentas }) {
                 : `El sistema generó ${traslados.length} borradores de traslado`}
             </p>
             <p className="text-sm text-slate-300">
-              Del Almacén Principal a la sucursal, para cubrir {dias} días de demanda según el ritmo de ventas.{' '}
+              Del Almacén Principal a {sucursales.length > 1 ? `${sucursales.length} sucursales` : 'la sucursal'}, para
+              cubrir {dias} días de demanda según el ritmo de ventas de cada una.{' '}
               {usuario.rol === 'gerente'
                 ? 'Revisa y aprueba los pendientes.'
                 : 'Ajusta las cantidades antes de enviarlos a aprobación.'}
@@ -129,7 +135,7 @@ export default function Dashboard({ usuario, onVerVentas }) {
         <Kpi
           icono={CheckCircle2}
           etiqueta="Aprobados en esta sesión"
-          valor={traslados.filter((t) => t.estado === 'aprobado').length}
+          valor={deSucursal.filter((t) => t.estado === 'aprobado').length}
           acento="bg-emerald-50 text-emerald-600"
         />
         <Kpi
@@ -142,6 +148,21 @@ export default function Dashboard({ usuario, onVerVentas }) {
 
       <section className="space-y-3">
         <div className="flex gap-2 overflow-x-auto pb-1">
+          {sucursales.length > 1 && (
+            <select
+              aria-label="Sucursal destino"
+              value={sucursalActiva}
+              onChange={(e) => setSucursal(e.target.value)}
+              className="rounded-full border-0 bg-white px-4 py-1.5 text-sm font-medium text-slate-700 ring-1 ring-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-900"
+            >
+              <option value="todas">Todas las sucursales</option>
+              {sucursales.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          )}
           {FILTROS.map((f) => (
             <button
               key={f.id}

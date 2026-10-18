@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import unicodedata
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -41,6 +42,7 @@ class Inventario(db.Model):
     articulo_codigo = db.Column(db.String(50))
     origen_inventario = db.Column(db.String(10)) # 'INV' (sucursales) o 'INVAL' (almacén principal)
     existencia = db.Column(db.Integer, default=0)
+    sucursal = db.Column(db.String(100))  # solo para 'INV'; el almacén principal no tiene sucursal
 
 class TasaInterna(db.Model):
     __tablename__ = 'tasas_internas'
@@ -253,10 +255,17 @@ def cargar_ventas(df, sucursal):
     return mensaje
 
 
-def cargar_inventario(df, origen):
+def cargar_inventario(df, origen, sucursal=None):
+    # El reporte es una foto completa: reemplaza el inventario de ese almacén o sucursal
+    # (en sucursales, también el de cargas antiguas sin sucursal).
+    anterior = Inventario.query.filter(Inventario.origen_inventario == origen)
+    if origen == 'INV':
+        anterior = anterior.filter(or_(Inventario.sucursal == sucursal, Inventario.sucursal.is_(None)))
+    anterior.delete(synchronize_session=False)
+
     # Precarga en memoria para evitar una consulta por fila.
     articulos = {a.codigo: a for a in Articulo.query.all()}
-    inventarios = {i.articulo_codigo: i for i in Inventario.query.filter_by(origen_inventario=origen)}
+    existencias = {}  # si un código se repite en el archivo, prevalece la última fila
     nuevos, actualizados = 0, 0
     # Incluye los de uso interno ya guardados por cargas anteriores, para limpiarlos.
     codigos_internos = {c for c, a in articulos.items() if (a.nombredegrupo or '').upper() in GRUPOS_EXCLUIDOS}
@@ -291,24 +300,40 @@ def cargar_inventario(df, origen):
                 art.nombredegrupo = grupo_val
             actualizados += 1
 
-        inv = inventarios.get(codigo_art)
-        if inv:
-            inv.existencia = existencia_actual
-        else:
-            inv = Inventario(articulo_codigo=codigo_art, origen_inventario=origen, existencia=existencia_actual)
-            db.session.add(inv)
-            inventarios[codigo_art] = inv
+        existencias[codigo_art] = existencia_actual
+
+    db.session.add_all(
+        Inventario(articulo_codigo=c, origen_inventario=origen, existencia=e, sucursal=sucursal)
+        for c, e in existencias.items()
+    )
 
     if codigos_internos:
         Inventario.query.filter(Inventario.articulo_codigo.in_(codigos_internos)).delete(synchronize_session=False)
         Articulo.query.filter(Articulo.codigo.in_(codigos_internos)).delete(synchronize_session=False)
 
     db.session.commit()
-    mensaje = (f"Inventario {origen} guardado: {nuevos + actualizados} artículos "
+    destino = f"de {sucursal} (INV)" if origen == 'INV' else "del Almacén Principal (INVAL)"
+    mensaje = (f"Inventario {destino} guardado: {nuevos + actualizados} artículos "
                f"({nuevos} nuevos, {actualizados} actualizados).")
     if codigos_internos:
         mensaje += f" {len(codigos_internos)} ignorados por ser de uso interno (Marketing / Equipos de oficina)."
     return mensaje
+
+
+def clave_sucursal(nombre):
+    sin_acentos = unicodedata.normalize('NFKD', nombre).encode('ascii', 'ignore').decode()
+    return ' '.join(sin_acentos.lower().split())
+
+
+def canonizar_sucursal(nombre):
+    """Reutiliza el nombre ya registrado si coincide sin distinguir mayúsculas ni acentos ("MATURIN" -> "Maturín")."""
+    nombre = ' '.join(texto(nombre).split())
+    if not nombre:
+        return ''
+    existentes = {s for (s,) in db.session.query(Venta.sucursal).distinct() if s}
+    existentes |= {s for (s,) in db.session.query(Inventario.sucursal).distinct() if s}
+    clave = clave_sucursal(nombre)
+    return next((s for s in sorted(existentes) if clave_sucursal(s) == clave), nombre.title())
 
 
 # ==================== API ====================
@@ -321,16 +346,20 @@ def carga_inicial():
         return jsonify(success=False, error=f"tipo_reporte inválido. Opciones: {', '.join(sorted(TIPOS_REPORTE))}."), 400
     if not archivo or not archivo.filename:
         return jsonify(success=False, error="No se recibió ningún archivo."), 400
-    sucursal = texto(request.form.get('sucursal')).title()
-    if tipo_reporte == 'ventas' and not sucursal:
-        return jsonify(success=False, error="Indica la sucursal a la que pertenece el historial de ventas."), 400
+    # Los reportes de ventas y de inventario de sucursal no traen la sucursal: se indica al cargar.
+    requiere_sucursal = tipo_reporte in ('ventas', 'inv_fisico')
+    sucursal = canonizar_sucursal(request.form.get('sucursal')) if requiere_sucursal else None
+    if requiere_sucursal and not sucursal:
+        return jsonify(success=False, error="Indica la sucursal a la que pertenece el reporte."), 400
 
     try:
         df = leer_archivo(archivo, tipo_reporte)
         if tipo_reporte == 'ventas':
             mensaje = cargar_ventas(df, sucursal)
+        elif tipo_reporte == 'inv_fisico':
+            mensaje = cargar_inventario(df, 'INV', sucursal)
         else:
-            mensaje = cargar_inventario(df, 'INV' if tipo_reporte == 'inv_fisico' else 'INVAL')
+            mensaje = cargar_inventario(df, 'INVAL')
         return jsonify(success=True, message=mensaje), 200
     except ErrorCarga as e:
         db.session.rollback()
@@ -400,14 +429,31 @@ def logistica():
     except (TypeError, ValueError):
         return jsonify(success=False, error="dias debe ser un número entero."), 400
 
-    stock = {}
-    for codigo, origen, total in db.session.query(
-        Inventario.articulo_codigo, Inventario.origen_inventario, func.sum(Inventario.existencia)
-    ).group_by(Inventario.articulo_codigo, Inventario.origen_inventario):
-        stock[(codigo, origen)] = int(total or 0)
+    # Stock del almacén por artículo y de cada sucursal por (artículo, sucursal).
+    stock_almacen, stock_sucursal = {}, {}
+    for codigo, origen, sucursal, total in db.session.query(
+        Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal, func.sum(Inventario.existencia)
+    ).group_by(Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal):
+        if origen == 'INVAL':
+            stock_almacen[codigo] = stock_almacen.get(codigo, 0) + int(total or 0)
+        else:
+            stock_sucursal[(codigo, sucursal or 'Sin asignar')] = int(total or 0)
+    # Solo se sugieren traslados a sucursales con inventario cargado (sin él, su stock es desconocido).
+    sucursales = sorted({s for _, s in stock_sucursal})
 
-    ventas = {
-        codigo: (int(unidades or 0), desde, hasta)
+    def venta_diaria(unidades, desde, hasta):
+        rango_dias = (hasta - desde).days + 1 if desde else 30
+        return int(unidades or 0) / (rango_dias if rango_dias > 0 else 1)
+
+    vpd_sucursal = {
+        (codigo, sucursal or 'Sin asignar'): venta_diaria(unidades, desde, hasta)
+        for codigo, sucursal, unidades, desde, hasta in db.session.query(
+            Venta.articulo_codigo, Venta.sucursal, func.sum(Venta.cantidad_neta),
+            func.min(Venta.fecha_emision), func.max(Venta.fecha_emision),
+        ).group_by(Venta.articulo_codigo, Venta.sucursal)
+    }
+    vpd_total = {
+        codigo: venta_diaria(unidades, desde, hasta)
         for codigo, unidades, desde, hasta in db.session.query(
             Venta.articulo_codigo, func.sum(Venta.cantidad_neta),
             func.min(Venta.fecha_emision), func.max(Venta.fecha_emision),
@@ -417,25 +463,34 @@ def logistica():
     abc = clasificacion_abc()
     resultados = []
     for art in Articulo.query.all():
-        stock_inv = stock.get((art.codigo, 'INV'), 0)
-        stock_inval = stock.get((art.codigo, 'INVAL'), 0)
-
-        total_unidades, desde, hasta = ventas.get(art.codigo, (0, None, None))
-        rango_dias = (hasta - desde).days + 1 if desde else 30
-        vpd = total_unidades / (rango_dias if rango_dias > 0 else 1)
-        demanda_proyectada = vpd * dias
+        stock_inval = stock_almacen.get(art.codigo, 0)
 
         if tipo_analisis == 'traslado':
-            if stock_inv < demanda_proyectada and stock_inval > 0:
-                cant_a_mover = min(round(demanda_proyectada - stock_inv), stock_inval)
-                if cant_a_mover > 0:
-                    resultados.append({
-                        'codigo': art.codigo, 'nombre': art.nombre, 'grupo': art.nombredegrupo,
-                        'origen': 'INVAL', 'destino': 'INV', 'cantidad': cant_a_mover, 'disponible_almacen': stock_inval,
-                        'stock_sucursal': stock_inv, 'clasificacion_abc': abc.get(art.codigo, 'C'),
-                    })
+            if stock_inval <= 0:
+                continue
+            necesidades = []
+            for sucursal in sucursales:
+                stock_suc = stock_sucursal.get((art.codigo, sucursal), 0)
+                vpd = vpd_sucursal.get((art.codigo, sucursal), 0)
+                faltante = round(vpd * dias - stock_suc)
+                if faltante > 0:
+                    necesidades.append((stock_suc / vpd, sucursal, stock_suc, faltante))
+            # Si el almacén no alcanza para todas, se atiende primero a la sucursal con menos días de cobertura.
+            disponible = stock_inval
+            for _, sucursal, stock_suc, faltante in sorted(necesidades):
+                cant_a_mover = min(faltante, disponible)
+                if cant_a_mover <= 0:
+                    break
+                disponible -= cant_a_mover
+                resultados.append({
+                    'codigo': art.codigo, 'nombre': art.nombre, 'grupo': art.nombredegrupo,
+                    'origen': 'INVAL', 'destino': 'INV', 'sucursal': sucursal,
+                    'cantidad': cant_a_mover, 'disponible_almacen': stock_inval,
+                    'stock_sucursal': stock_suc, 'clasificacion_abc': abc.get(art.codigo, 'C'),
+                })
         else:
-            stock_total = stock_inv + stock_inval
+            demanda_proyectada = vpd_total.get(art.codigo, 0) * dias
+            stock_total = stock_inval + sum(stock_sucursal.get((art.codigo, s), 0) for s in sucursales)
             if stock_total < demanda_proyectada:
                 cant_a_pedir = max(0, round(demanda_proyectada - stock_total))
                 if cant_a_pedir > 0:
@@ -534,16 +589,21 @@ def capital_estancado():
         Venta.articulo_codigo, func.max(Venta.fecha_emision)
     ).filter(Venta.cantidad_neta > 0).group_by(Venta.articulo_codigo).all())
 
-    stock = {}
-    for codigo, origen, total in db.session.query(
-        Inventario.articulo_codigo, Inventario.origen_inventario, func.sum(Inventario.existencia)
-    ).group_by(Inventario.articulo_codigo, Inventario.origen_inventario):
-        stock[(codigo, origen)] = max(int(total or 0), 0)
+    almacen, por_sucursal = {}, {}
+    for codigo, origen, sucursal, total in db.session.query(
+        Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal, func.sum(Inventario.existencia)
+    ).group_by(Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal):
+        cantidad = max(int(total or 0), 0)
+        if origen == 'INVAL':
+            almacen[codigo] = almacen.get(codigo, 0) + cantidad
+        elif cantidad:
+            por_sucursal.setdefault(codigo, {})[sucursal or 'Sin asignar'] = cantidad
 
     articulos = []
     for art in Articulo.query.filter(Articulo.costoex > 0):
-        existencia_sucursal = stock.get((art.codigo, 'INV'), 0)
-        existencia_almacen = stock.get((art.codigo, 'INVAL'), 0)
+        sucursales = por_sucursal.get(art.codigo, {})
+        existencia_sucursal = sum(sucursales.values())
+        existencia_almacen = almacen.get(art.codigo, 0)
         existencia = existencia_sucursal + existencia_almacen
         if existencia <= 0:
             continue
@@ -560,6 +620,7 @@ def capital_estancado():
             'grupo': art.nombredegrupo,
             'existencia': existencia,
             'existencia_sucursal': existencia_sucursal,
+            'existencia_por_sucursal': dict(sorted(sucursales.items())),
             'existencia_almacen': existencia_almacen,
             'costo_unitario': round(costo, 4),
             'dias_sin_vender': dias_sin_vender,
@@ -639,12 +700,16 @@ def archivo_muy_grande(_):
     return jsonify(success=False, error="El archivo supera el límite de 25 MB."), 413
 
 
+COLUMNAS_AGREGADAS = [('ventas', 'sucursal', 'VARCHAR(100)'), ('inventarios', 'sucursal', 'VARCHAR(100)')]
+
+
 def migrar_esquema():
     """create_all no agrega columnas a tablas existentes: se añaden aquí las incorporadas después."""
-    columnas = {c['name'] for c in inspect(db.engine).get_columns('ventas')}
-    if 'sucursal' not in columnas:
-        with db.engine.begin() as conexion:
-            conexion.execute(text('ALTER TABLE ventas ADD COLUMN sucursal VARCHAR(100)'))
+    inspector = inspect(db.engine)
+    for tabla, columna, tipo in COLUMNAS_AGREGADAS:
+        if columna not in {c['name'] for c in inspector.get_columns(tabla)}:
+            with db.engine.begin() as conexion:
+                conexion.execute(text(f'ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}'))
 
 
 if __name__ == '__main__':

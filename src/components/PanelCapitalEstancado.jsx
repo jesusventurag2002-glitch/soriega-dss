@@ -54,9 +54,15 @@ function DiasSinVender({ articulo }) {
 }
 
 function Ubicacion({ articulo }) {
+  const sucursales = Object.entries(articulo.existencia_por_sucursal ?? {});
   return (
-    <span className="text-xs text-slate-500 whitespace-nowrap">
-      Suc. {articulo.existencia_sucursal} · Alm. {articulo.existencia_almacen}
+    <span className="text-xs text-slate-500">
+      {sucursales.map(([nombre, cantidad]) => (
+        <span key={nombre} className="whitespace-nowrap">
+          {nombre} {cantidad} ·{' '}
+        </span>
+      ))}
+      <span className="whitespace-nowrap">Alm. {articulo.existencia_almacen}</span>
     </span>
   );
 }

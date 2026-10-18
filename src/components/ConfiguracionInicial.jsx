@@ -29,9 +29,16 @@ function Alerta({ tipo, texto, onCerrar }) {
   );
 }
 
-// "VENTAS BARCELONA.XLS" -> "Barcelona"
+// "VENTAS BARCELONA.XLS" / "INVENTARIO MATURIN.XLS" -> "Barcelona" / "Maturin"
 const sugerirSucursal = (nombreArchivo) =>
-  capitalizar(nombreArchivo.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').replace(/\bventas?\b/gi, '').trim());
+  capitalizar(
+    nombreArchivo
+      .replace(/\.[^.]+$/, '')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\b(ventas?|inventarios?|inv)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
 
 export default function ConfiguracionInicial() {
   const [tipoReporte, setTipoReporte] = useState(TIPOS_REPORTE[0].value);
@@ -40,8 +47,9 @@ export default function ConfiguracionInicial() {
   const [isLoading, setIsLoading] = useState(false);
   const [mensaje, setMensaje] = useState(null); // { tipo: 'exito' | 'error', texto }
 
-  const esVentas = tipoReporte === 'ventas';
-  const faltaSucursal = esVentas && !sucursal.trim();
+  // Ventas e inventario de sucursal no indican la sucursal en el archivo.
+  const pideSucursal = tipoReporte === 'ventas' || tipoReporte === 'inv_fisico';
+  const faltaSucursal = pideSucursal && !sucursal.trim();
 
   const procesar = async (e) => {
     e.preventDefault();
@@ -50,7 +58,7 @@ export default function ConfiguracionInicial() {
     setIsLoading(true);
     setMensaje(null);
     try {
-      const data = await cargarArchivoInicial(tipoReporte, archivo, esVentas ? sucursal.trim() : null);
+      const data = await cargarArchivoInicial(tipoReporte, archivo, pideSucursal ? sucursal.trim() : null);
       if (data.success) {
         setMensaje({ tipo: 'exito', texto: data.message || 'Archivo procesado correctamente.' });
         setArchivo(null);
@@ -125,7 +133,7 @@ export default function ConfiguracionInicial() {
             />
           </div>
 
-          {esVentas && (
+          {pideSucursal && (
             <div>
               <label htmlFor="sucursal" className="mb-2 block text-sm font-medium text-slate-700">
                 3. Sucursal
@@ -142,7 +150,8 @@ export default function ConfiguracionInicial() {
                 />
               </div>
               <p className="mt-1.5 text-xs text-slate-500">
-                El reporte no indica la sucursal. Al cargarlo se reemplazan solo las ventas de esta sucursal.
+                El reporte no indica la sucursal. Al cargarlo se reemplazan solo{' '}
+                {tipoReporte === 'ventas' ? 'las ventas' : 'el inventario'} de esta sucursal.
               </p>
             </div>
           )}
