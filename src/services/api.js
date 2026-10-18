@@ -33,6 +33,14 @@ export async function obtenerTrasladosSugeridos(dias) {
     );
 }
 
+// Artículos con stock sin ventas en los últimos `diasMin` días, ordenados por capital inmovilizado.
+export async function obtenerCapitalEstancado(diasMin, limite = 100) {
+  const respuesta = await fetch(`${API_URL}/api/capital_estancado?dias_min=${diasMin}&limite=${limite}`);
+  const data = await respuesta.json();
+  if (!data.success) throw new Error(data.error || 'No se pudo obtener el capital estancado.');
+  return data;
+}
+
 export async function cargarArchivoInicial(tipoReporte, archivo) {
   const formData = new FormData();
   formData.append('tipo_reporte', tipoReporte);

@@ -415,6 +415,73 @@ def logistica():
     return jsonify(success=True, tipo_analisis=tipo_analisis, dias=dias, resultados=resultados)
 
 
+@app.route('/api/capital_estancado', methods=['GET'])
+def capital_estancado():
+    """Artículos con existencia y costo cuya última venta supera dias_min (o que no se vendieron en el historial)."""
+    dias_min = request.args.get('dias_min', default=90, type=int)
+    limite = request.args.get('limite', default=100, type=int)
+
+    inicio, corte = db.session.query(func.min(Venta.fecha_emision), func.max(Venta.fecha_emision)).one()
+    if corte is None:
+        return jsonify(success=False, error="No hay historial de ventas cargado."), 400
+    # Los días se cuentan hasta la última fecha del historial, no hasta hoy, porque los datos son una foto fija.
+    dias_historial = (corte - inicio).days
+
+    ultima_venta = dict(db.session.query(
+        Venta.articulo_codigo, func.max(Venta.fecha_emision)
+    ).filter(Venta.cantidad_neta > 0).group_by(Venta.articulo_codigo).all())
+
+    stock = {}
+    for codigo, origen, total in db.session.query(
+        Inventario.articulo_codigo, Inventario.origen_inventario, func.sum(Inventario.existencia)
+    ).group_by(Inventario.articulo_codigo, Inventario.origen_inventario):
+        stock[(codigo, origen)] = max(int(total or 0), 0)
+
+    articulos = []
+    for art in Articulo.query.filter(Articulo.costoex > 0):
+        existencia_sucursal = stock.get((art.codigo, 'INV'), 0)
+        existencia_almacen = stock.get((art.codigo, 'INVAL'), 0)
+        existencia = existencia_sucursal + existencia_almacen
+        if existencia <= 0:
+            continue
+
+        ultima = ultima_venta.get(art.codigo)
+        dias_sin_vender = (corte - ultima).days if ultima else dias_historial
+        if dias_sin_vender < dias_min:
+            continue
+
+        costo = float(art.costoex)
+        articulos.append({
+            'codigo': art.codigo,
+            'descripcion': art.nombre,
+            'grupo': art.nombredegrupo,
+            'existencia': existencia,
+            'existencia_sucursal': existencia_sucursal,
+            'existencia_almacen': existencia_almacen,
+            'costo_unitario': round(costo, 4),
+            'dias_sin_vender': dias_sin_vender,
+            'sin_ventas': ultima is None,
+            'ultima_venta': ultima.isoformat() if ultima else None,
+            'capital_estancado': round(existencia * costo, 2),
+        })
+
+    articulos.sort(key=lambda a: a['capital_estancado'], reverse=True)
+    total = len(articulos)
+    return jsonify(
+        success=True,
+        fecha_corte=corte.isoformat(),
+        dias_historial=dias_historial,
+        dias_min=dias_min,
+        resumen={
+            'capital_total': round(sum(a['capital_estancado'] for a in articulos), 2),
+            'articulos': total,
+            'sin_ventas': sum(a['sin_ventas'] for a in articulos),
+            'promedio_dias': round(sum(a['dias_sin_vender'] for a in articulos) / total) if total else 0,
+        },
+        articulos=articulos[:limite],
+    )
+
+
 @app.route('/api/tasas', methods=['GET'])
 def listar_tasas():
     tasas = TasaInterna.query.order_by(TasaInterna.fecha.desc()).limit(5).all()
