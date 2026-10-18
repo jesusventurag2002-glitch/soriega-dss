@@ -4,4 +4,4 @@ flask-cors>=5.0
 pandas>=2.2
 openpyxl>=3.1      # lectura de .xlsx
 xlrd>=2.0          # lectura de .xls
-psycopg2-binary>=2.9
+psycopg[binary]>=3.2  # driver PostgreSQL (por defecto en SQLAlchemy 2.1)

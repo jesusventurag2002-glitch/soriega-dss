@@ -12,7 +12,7 @@ app = Flask(__name__)
 
 # Conexión a PostgreSQL. Se puede sobrescribir con la variable de entorno DATABASE_URL.
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
-    'DATABASE_URL', 'postgresql://usuario:password@localhost:5432/dss_inventario'
+    'DATABASE_URL', 'postgresql+psycopg://usuario:password@localhost:5432/dss_inventario'
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB por archivo
