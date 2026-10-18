@@ -70,7 +70,7 @@ export default function Login({ onLogin }) {
             Entrar <ArrowRight className="h-4 w-4" />
           </button>
 
-          <p className="text-center text-xs text-slate-400">Demo · Datos simulados</p>
+          <p className="text-center text-xs text-slate-400">Demo · Inicio de sesión simulado (sin contraseña)</p>
         </form>
       </div>
     </div>

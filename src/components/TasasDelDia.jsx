@@ -22,25 +22,32 @@ function Vigente({ etiqueta, dato, fecha }) {
 export default function TasasDelDia() {
   const [datos, setDatos] = useState(null);
   const [fecha, setFecha] = useState(null); // null = hoy
+  const [dias, setDias] = useState(15);
+  const [soloBcv, setSoloBcv] = useState(false);
   const [abierto, setAbierto] = useState(false);
   const [error, setError] = useState(false);
   const ref = useRef(null);
 
   useEffect(() => {
-    obtenerTasas(fecha)
+    obtenerTasas(fecha, dias)
       .then((d) => {
         setDatos(d);
         setError(false);
       })
       .catch(() => setError(true));
-  }, [fecha]);
+  }, [fecha, dias]);
 
-  // Cierra el panel al hacer clic fuera.
+  // Cierra el panel al hacer clic fuera o con Escape.
   useEffect(() => {
-    if (!abierto) return;
+    if (!abierto) return undefined;
     const cerrar = (e) => ref.current && !ref.current.contains(e.target) && setAbierto(false);
+    const conEscape = (e) => e.key === 'Escape' && setAbierto(false);
     document.addEventListener('mousedown', cerrar);
-    return () => document.removeEventListener('mousedown', cerrar);
+    document.addEventListener('keydown', conEscape);
+    return () => {
+      document.removeEventListener('mousedown', cerrar);
+      document.removeEventListener('keydown', conEscape);
+    };
   }, [abierto]);
 
   if (error && !datos) return null;
@@ -50,6 +57,7 @@ export default function TasasDelDia() {
       <button
         onClick={() => setAbierto((v) => !v)}
         title="Tasas del día"
+        aria-expanded={abierto}
         className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-200"
       >
         <Landmark className="h-4 w-4 text-slate-500" />
@@ -63,7 +71,7 @@ export default function TasasDelDia() {
       </button>
 
       {abierto && datos && (
-        <div className="fixed sm:absolute inset-x-4 sm:inset-x-auto sm:right-0 top-16 sm:top-auto sm:mt-2 sm:w-96 z-40 rounded-xl bg-white shadow-2xl ring-1 ring-slate-200">
+        <div className="fixed sm:absolute inset-x-4 sm:inset-x-auto sm:right-0 top-16 sm:top-auto sm:mt-2 sm:w-[26rem] z-40 rounded-xl bg-white shadow-2xl ring-1 ring-slate-200">
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
             <p className="font-semibold text-slate-900">Tasas del sistema</p>
             <button onClick={() => setAbierto(false)} className="p-1 text-slate-400 hover:text-slate-700" aria-label="Cerrar">
@@ -85,8 +93,30 @@ export default function TasasDelDia() {
             </label>
 
             <div className="grid grid-cols-2 gap-2">
-              <Vigente etiqueta="Tasa BCV" dato={datos.bcv} fecha={datos.fecha} />
-              <Vigente etiqueta="Tasa interna" dato={datos.interna} fecha={datos.fecha} />
+              <Vigente etiqueta="BCV vigente" dato={datos.bcv} fecha={datos.fecha} />
+              <Vigente etiqueta="Interna vigente" dato={datos.interna} fecha={datos.fecha} />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3 text-sm">
+              <p className="font-medium text-slate-700">Historial</p>
+              <div className="flex items-center gap-3">
+                <label className="inline-flex items-center gap-1.5 text-xs text-slate-600">
+                  <input type="checkbox" checked={soloBcv} onChange={(e) => setSoloBcv(e.target.checked)} className="accent-slate-900" />
+                  Solo días con BCV
+                </label>
+                <select
+                  aria-label="Días de historial"
+                  value={dias}
+                  onChange={(e) => setDias(Number(e.target.value))}
+                  className="rounded-lg border border-slate-300 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-slate-900"
+                >
+                  {[7, 15, 30, 90].map((d) => (
+                    <option key={d} value={d}>
+                      Últimos {d} días
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div className="max-h-56 overflow-y-auto">
@@ -99,13 +129,22 @@ export default function TasasDelDia() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 tabular-nums">
-                  {datos.historial.map((h) => (
-                    <tr key={h.fecha} className={h.fecha === datos.fecha ? 'bg-slate-50 font-medium' : ''}>
-                      <td className="py-1.5 capitalize text-slate-600">{fechaCorta(h.fecha)}</td>
-                      <td className="py-1.5 text-right text-slate-900">{tasa(h.bcv)}</td>
-                      <td className="py-1.5 text-right text-slate-900">{tasa(h.interna)}</td>
-                    </tr>
-                  ))}
+                  {datos.historial
+                    .filter((h) => !soloBcv || h.bcv != null)
+                    .map((h) => (
+                      <tr key={h.fecha} className={h.fecha === datos.fecha ? 'bg-slate-50 font-medium' : ''}>
+                        <td className="py-1.5 capitalize text-slate-600">
+                          {fechaCorta(h.fecha)}
+                          {h.fecha === datos.fecha && <span className="ml-1.5 rounded bg-slate-900 px-1 text-[10px] font-semibold text-white">consultada</span>}
+                        </td>
+                        <td className={`py-1.5 text-right ${h.fecha === datos.bcv?.fecha ? 'font-semibold text-slate-900' : 'text-slate-700'}`}>
+                          {tasa(h.bcv)}
+                        </td>
+                        <td className={`py-1.5 text-right ${h.fecha === datos.interna?.fecha ? 'font-semibold text-slate-900' : 'text-slate-700'}`}>
+                          {tasa(h.interna)}
+                        </td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
               {datos.historial.length === 0 && (

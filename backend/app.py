@@ -1,8 +1,10 @@
 import io
+import json
 import os
 import re
 import unicodedata
 from datetime import datetime, timedelta
+from urllib.parse import unquote
 
 import pandas as pd
 from flask import Flask, jsonify, request
@@ -73,6 +75,76 @@ class Venta(db.Model):
     sucursal = db.Column(db.String(100))  # indicada al cargar el reporte; el archivo no la trae
     factura_bs = db.Column(db.Numeric(16, 4))  # PRECIOFIN * 1.16 * cantidad neta; el USD se calcula con la tasa interna
     excepcion = db.Column(db.String(50))  # id de EXCEPCIONES si no es facturación comercial
+
+class Traslado(db.Model):
+    """Operación de traslado entre el almacén principal y una sucursal, con su ciclo de vida."""
+    __tablename__ = 'traslados'
+    id = db.Column(db.Integer, primary_key=True)
+    articulo_codigo = db.Column(db.String(50), nullable=False, index=True)
+    articulo_nombre = db.Column(db.String(255), nullable=False)
+    clasificacion_abc = db.Column(db.String(1))
+    tipo = db.Column(db.String(20), nullable=False, default='reposicion')  # 'reposicion' (almacén -> sucursal) o 'retorno'
+    origen = db.Column(db.String(100), nullable=False)  # ALMACEN o nombre de sucursal
+    destino = db.Column(db.String(100), nullable=False)
+    estado = db.Column(db.String(30), nullable=False, default='borrador', index=True)
+    cantidad_sugerida = db.Column(db.Integer, nullable=False)
+    cantidad_aprobada = db.Column(db.Integer)
+    cantidad_despachada = db.Column(db.Integer)
+    cantidad_recibida = db.Column(db.Integer)
+    # Foto del momento en que se generó la propuesta (las existencias vienen de exportaciones).
+    stock_origen = db.Column(db.Integer)
+    stock_destino = db.Column(db.Integer)
+    cobertura_dias = db.Column(db.Float)  # días que cubría el stock del destino; menor = más urgente
+    horizonte_dias = db.Column(db.Integer)
+    motivo_rechazo = db.Column(db.Text)
+    observaciones = db.Column(db.Text)
+    creado_por = db.Column(db.String(100))
+    creado_en = db.Column(db.DateTime, nullable=False)
+    actualizado_en = db.Column(db.DateTime, nullable=False)
+    # Se incrementa en cada cambio: una acción enviada con una versión vieja (doble clic, otra pestaña) se rechaza.
+    version = db.Column(db.Integer, nullable=False, default=1)
+
+class EventoTraslado(db.Model):
+    """Historial inmutable de cada traslado: quién hizo qué, cuándo y con qué valores antes y después."""
+    __tablename__ = 'traslado_eventos'
+    id = db.Column(db.Integer, primary_key=True)
+    traslado_id = db.Column(db.Integer, db.ForeignKey('traslados.id'), nullable=False, index=True)
+    tipo = db.Column(db.String(40), nullable=False)
+    estado_anterior = db.Column(db.String(30))
+    estado_nuevo = db.Column(db.String(30))
+    usuario = db.Column(db.String(100))
+    rol = db.Column(db.String(30))
+    fecha = db.Column(db.DateTime, nullable=False, index=True)
+    detalle = db.Column(db.Text)  # JSON: {"antes": {...}, "despues": {...}, "comentario": "..."}
+
+class AccionEstancado(db.Model):
+    """Seguimiento de decisiones sobre mercancía estancada (promoción o devolución a proveedor)."""
+    __tablename__ = 'acciones_estancado'
+    id = db.Column(db.Integer, primary_key=True)
+    articulo_codigo = db.Column(db.String(50), nullable=False, index=True)
+    articulo_nombre = db.Column(db.String(255), nullable=False)
+    tipo = db.Column(db.String(30), nullable=False)  # 'promocion' | 'devolucion_proveedor'
+    estado = db.Column(db.String(20), nullable=False, default='pendiente')  # pendiente | completada | descartada
+    capital_al_registrar = db.Column(db.Numeric(14, 2))
+    comentario = db.Column(db.Text)
+    resultado = db.Column(db.Text)
+    creado_por = db.Column(db.String(100))
+    creado_en = db.Column(db.DateTime, nullable=False)
+    cerrado_por = db.Column(db.String(100))
+    cerrado_en = db.Column(db.DateTime)
+
+class Importacion(db.Model):
+    """Registro de cada archivo cargado, para saber de cuándo son los datos que se muestran."""
+    __tablename__ = 'importaciones'
+    id = db.Column(db.Integer, primary_key=True)
+    tipo_reporte = db.Column(db.String(20), nullable=False)
+    sucursal = db.Column(db.String(100))
+    archivo = db.Column(db.String(255))
+    exito = db.Column(db.Boolean, nullable=False)
+    mensaje = db.Column(db.Text)
+    fecha_importacion = db.Column(db.DateTime, nullable=False)
+    datos_hasta = db.Column(db.Date)  # última fecha contenida en el archivo, cuando la trae (ventas, tasas)
+    usuario = db.Column(db.String(100))
 
 
 # ==================== UTILIDADES DE PARSEO ====================
@@ -326,7 +398,7 @@ def cargar_tasas(df):
     db.session.commit()
     desde, hasta = min(tasas), max(tasas)
     return (f"Tasas internas guardadas: {len(tasas)} días, del {desde:%d/%m/%Y} al {hasta:%d/%m/%Y}. "
-            f"Las ventas en USD se recalculan con estas tasas.")
+            f"Las ventas en USD se recalculan con estas tasas."), hasta
 
 
 def cargar_inventario(df, origen, sucursal=None):
@@ -426,23 +498,35 @@ def carga_inicial():
     if requiere_sucursal and not sucursal:
         return jsonify(success=False, error="Indica la sucursal a la que pertenece el reporte."), 400
 
+    def registrar_importacion(exito, mensaje, datos_hasta=None):
+        db.session.add(Importacion(
+            tipo_reporte=tipo_reporte, sucursal=sucursal, archivo=archivo.filename[:255], exito=exito,
+            mensaje=mensaje, fecha_importacion=datetime.now(), datos_hasta=datos_hasta, usuario=usuario_actual()[0],
+        ))
+        db.session.commit()
+
     try:
         df = leer_archivo(archivo, tipo_reporte)
+        datos_hasta = None
         if tipo_reporte == 'ventas':
             mensaje = cargar_ventas(df, sucursal)
+            datos_hasta = db.session.query(func.max(Venta.fecha_emision)).filter(Venta.sucursal == sucursal).scalar()
         elif tipo_reporte == 'inv_fisico':
             mensaje = cargar_inventario(df, 'INV', sucursal)
         elif tipo_reporte == 'tasas':
-            mensaje = cargar_tasas(df)
+            mensaje, datos_hasta = cargar_tasas(df)
         else:
             mensaje = cargar_inventario(df, 'INVAL')
+        registrar_importacion(True, mensaje, datos_hasta)
         return jsonify(success=True, message=mensaje), 200
     except ErrorCarga as e:
         db.session.rollback()
+        registrar_importacion(False, str(e))
         return jsonify(success=False, error=str(e)), 400
     except Exception as e:
         db.session.rollback()
         app.logger.exception("Error procesando carga inicial")
+        registrar_importacion(False, str(e))
         return jsonify(success=False, error=f"Error procesando el archivo: {e}"), 500
 
 
@@ -511,18 +595,8 @@ def clasificacion_abc():
     return abc
 
 
-@app.route('/api/logistica', methods=['POST'])
-def logistica():
-    datos = request.get_json(silent=True) or {}
-    tipo_analisis = datos.get('tipo_analisis')
-    if tipo_analisis not in ('traslado', 'reposicion'):
-        return jsonify(success=False, error="tipo_analisis debe ser 'traslado' o 'reposicion'."), 400
-    try:
-        dias = int(datos.get('dias', 15))
-    except (TypeError, ValueError):
-        return jsonify(success=False, error="dias debe ser un número entero."), 400
-
-    # Stock del almacén por artículo y de cada sucursal por (artículo, sucursal).
+def datos_demanda():
+    """Stock (almacén y por sucursal) y venta diaria comercial por artículo, insumos de traslados y alertas."""
     stock_almacen, stock_sucursal = {}, {}
     for codigo, origen, sucursal, total in db.session.query(
         Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal, func.sum(Inventario.existencia)
@@ -531,7 +605,7 @@ def logistica():
             stock_almacen[codigo] = stock_almacen.get(codigo, 0) + int(total or 0)
         else:
             stock_sucursal[(codigo, sucursal or 'Sin asignar')] = int(total or 0)
-    # Solo se sugieren traslados a sucursales con inventario cargado (sin él, su stock es desconocido).
+    # Solo se consideran sucursales con inventario cargado (sin él, su stock es desconocido).
     sucursales = sorted({s for _, s in stock_sucursal})
 
     def venta_diaria(unidades, desde, hasta):
@@ -552,47 +626,76 @@ def logistica():
             func.min(Venta.fecha_emision), func.max(Venta.fecha_emision),
         ).filter(ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo)
     }
+    return stock_almacen, stock_sucursal, sucursales, vpd_sucursal, vpd_total
 
+
+def calcular_sugerencias_traslado(dias, comprometido_almacen=None):
+    """Necesidad de cada sucursal (venta diaria * días - stock) cubierta con el stock del almacén.
+
+    comprometido_almacen: unidades del almacén ya reservadas en traslados abiertos, que no se vuelven a repartir.
+    """
+    stock_almacen, stock_sucursal, sucursales, vpd_sucursal, _ = datos_demanda()
+    comprometido_almacen = comprometido_almacen or {}
     abc = clasificacion_abc()
     resultados = []
     for art in Articulo.query.all():
         stock_inval = stock_almacen.get(art.codigo, 0)
+        if stock_inval <= 0:
+            continue
+        necesidades = []
+        for sucursal in sucursales:
+            stock_suc = stock_sucursal.get((art.codigo, sucursal), 0)
+            vpd = vpd_sucursal.get((art.codigo, sucursal), 0)
+            faltante = round(vpd * dias - stock_suc)
+            if faltante > 0:
+                necesidades.append((stock_suc / vpd, sucursal, stock_suc, faltante))
+        # Si el almacén no alcanza para todas, se atiende primero a la sucursal con menos días de cobertura.
+        disponible = stock_inval - comprometido_almacen.get(art.codigo, 0)
+        for cobertura, sucursal, stock_suc, faltante in sorted(necesidades):
+            cant_a_mover = min(faltante, disponible)
+            if cant_a_mover <= 0:
+                break
+            disponible -= cant_a_mover
+            resultados.append({
+                'codigo': art.codigo, 'nombre': art.nombre, 'grupo': art.nombredegrupo,
+                'origen': 'INVAL', 'destino': 'INV', 'sucursal': sucursal,
+                'cantidad': cant_a_mover, 'disponible_almacen': stock_inval,
+                'stock_sucursal': stock_suc, 'clasificacion_abc': abc.get(art.codigo, 'C'),
+                'cobertura_dias': round(cobertura, 1),
+            })
+    return resultados
 
-        if tipo_analisis == 'traslado':
-            if stock_inval <= 0:
-                continue
-            necesidades = []
-            for sucursal in sucursales:
-                stock_suc = stock_sucursal.get((art.codigo, sucursal), 0)
-                vpd = vpd_sucursal.get((art.codigo, sucursal), 0)
-                faltante = round(vpd * dias - stock_suc)
-                if faltante > 0:
-                    necesidades.append((stock_suc / vpd, sucursal, stock_suc, faltante))
-            # Si el almacén no alcanza para todas, se atiende primero a la sucursal con menos días de cobertura.
-            disponible = stock_inval
-            for _, sucursal, stock_suc, faltante in sorted(necesidades):
-                cant_a_mover = min(faltante, disponible)
-                if cant_a_mover <= 0:
-                    break
-                disponible -= cant_a_mover
+
+@app.route('/api/logistica', methods=['POST'])
+def logistica():
+    datos = request.get_json(silent=True) or {}
+    tipo_analisis = datos.get('tipo_analisis')
+    if tipo_analisis not in ('traslado', 'reposicion'):
+        return jsonify(success=False, error="tipo_analisis debe ser 'traslado' o 'reposicion'."), 400
+    try:
+        dias = int(datos.get('dias', 15))
+    except (TypeError, ValueError):
+        return jsonify(success=False, error="dias debe ser un número entero."), 400
+
+    if tipo_analisis == 'traslado':
+        return jsonify(success=True, tipo_analisis=tipo_analisis, dias=dias, resultados=calcular_sugerencias_traslado(dias))
+
+    stock_almacen, stock_sucursal, sucursales, _, vpd_total = datos_demanda()
+    abc = clasificacion_abc()
+    resultados = []
+    for art in Articulo.query.all():
+        stock_inval = stock_almacen.get(art.codigo, 0)
+        demanda_proyectada = vpd_total.get(art.codigo, 0) * dias
+        stock_total = stock_inval + sum(stock_sucursal.get((art.codigo, s), 0) for s in sucursales)
+        if stock_total < demanda_proyectada:
+            cant_a_pedir = max(0, round(demanda_proyectada - stock_total))
+            if cant_a_pedir > 0:
                 resultados.append({
                     'codigo': art.codigo, 'nombre': art.nombre, 'grupo': art.nombredegrupo,
-                    'origen': 'INVAL', 'destino': 'INV', 'sucursal': sucursal,
-                    'cantidad': cant_a_mover, 'disponible_almacen': stock_inval,
-                    'stock_sucursal': stock_suc, 'clasificacion_abc': abc.get(art.codigo, 'C'),
+                    'proveedor': art.proveedor, 'cantidad_pedir': cant_a_pedir,
+                    'deficit': round(demanda_proyectada - stock_total),
+                    'clasificacion_abc': abc.get(art.codigo, 'C'),
                 })
-        else:
-            demanda_proyectada = vpd_total.get(art.codigo, 0) * dias
-            stock_total = stock_inval + sum(stock_sucursal.get((art.codigo, s), 0) for s in sucursales)
-            if stock_total < demanda_proyectada:
-                cant_a_pedir = max(0, round(demanda_proyectada - stock_total))
-                if cant_a_pedir > 0:
-                    resultados.append({
-                        'codigo': art.codigo, 'nombre': art.nombre, 'grupo': art.nombredegrupo,
-                        'proveedor': art.proveedor, 'cantidad_pedir': cant_a_pedir,
-                        'deficit': round(demanda_proyectada - stock_total),
-                        'clasificacion_abc': abc.get(art.codigo, 'C'),
-                    })
 
     return jsonify(success=True, tipo_analisis=tipo_analisis, dias=dias, resultados=resultados)
 
@@ -721,15 +824,15 @@ def analisis_ventas():
     )
 
 
-@app.route('/api/capital_estancado', methods=['GET'])
-def capital_estancado():
-    """Artículos con existencia y costo cuya última venta supera dias_min (o que no se vendieron en el historial)."""
-    dias_min = request.args.get('dias_min', default=90, type=int)
-    limite = request.args.get('limite', default=100, type=int)
+def calcular_capital_estancado(dias_min, sucursal=None):
+    """Artículos con existencia y costo cuya última venta supera dias_min (o que no se vendieron en el historial).
 
+    Sin sucursal: existencia consolidada (todas las sucursales + almacén). Con sucursal (o ALMACEN): solo la de esa
+    ubicación. Devuelve None si no hay ventas cargadas.
+    """
     inicio, corte = db.session.query(func.min(Venta.fecha_emision), func.max(Venta.fecha_emision)).one()
     if corte is None:
-        return jsonify(success=False, error="No hay historial de ventas cargado."), 400
+        return None
     # Los días se cuentan hasta la última fecha del historial, no hasta hoy, porque los datos son una foto fija.
     dias_historial = (corte - inicio).days
 
@@ -738,20 +841,24 @@ def capital_estancado():
     ).filter(Venta.cantidad_neta > 0, ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo).all())
 
     almacen, por_sucursal = {}, {}
-    for codigo, origen, sucursal, total in db.session.query(
+    for codigo, origen, ubicacion, total in db.session.query(
         Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal, func.sum(Inventario.existencia)
     ).group_by(Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal):
         cantidad = max(int(total or 0), 0)
         if origen == 'INVAL':
             almacen[codigo] = almacen.get(codigo, 0) + cantidad
         elif cantidad:
-            por_sucursal.setdefault(codigo, {})[sucursal or 'Sin asignar'] = cantidad
+            por_sucursal.setdefault(codigo, {})[ubicacion or 'Sin asignar'] = cantidad
 
     articulos = []
     for art in Articulo.query.filter(Articulo.costoex > 0):
         sucursales = por_sucursal.get(art.codigo, {})
+        if sucursal and sucursal != ALMACEN:
+            sucursales = {sucursal: sucursales[sucursal]} if sucursal in sucursales else {}
         existencia_sucursal = sum(sucursales.values())
-        existencia_almacen = almacen.get(art.codigo, 0)
+        existencia_almacen = almacen.get(art.codigo, 0) if sucursal in (None, ALMACEN) else 0
+        if sucursal == ALMACEN:
+            sucursales, existencia_sucursal = {}, 0
         existencia = existencia_sucursal + existencia_almacen
         if existencia <= 0:
             continue
@@ -779,19 +886,738 @@ def capital_estancado():
 
     articulos.sort(key=lambda a: a['capital_estancado'], reverse=True)
     total = len(articulos)
-    return jsonify(
-        success=True,
-        fecha_corte=corte.isoformat(),
-        dias_historial=dias_historial,
-        dias_min=dias_min,
-        resumen={
+    return {
+        'fecha_corte': corte.isoformat(),
+        'dias_historial': dias_historial,
+        'dias_min': dias_min,
+        'sucursal': sucursal,
+        'resumen': {
             'capital_total': round(sum(a['capital_estancado'] for a in articulos), 2),
             'articulos': total,
             'sin_ventas': sum(a['sin_ventas'] for a in articulos),
             'promedio_dias': round(sum(a['dias_sin_vender'] for a in articulos) / total) if total else 0,
         },
-        articulos=articulos[:limite],
+        'articulos': articulos,
+    }
+
+
+@app.route('/api/capital_estancado', methods=['GET'])
+def capital_estancado():
+    dias_min = request.args.get('dias_min', default=90, type=int)
+    limite = request.args.get('limite', default=100, type=int)
+    datos = calcular_capital_estancado(dias_min, texto(request.args.get('sucursal')) or None)
+    if datos is None:
+        return jsonify(success=False, error="No hay historial de ventas cargado."), 400
+
+    articulos = datos['articulos'][:limite]
+    # Seguimiento de cada artículo: acciones registradas y retornos al almacén en curso.
+    codigos = [a['codigo'] for a in articulos]
+    acciones = {}
+    for accion in AccionEstancado.query.filter(AccionEstancado.articulo_codigo.in_(codigos)).order_by(AccionEstancado.creado_en.desc()):
+        acciones.setdefault(accion.articulo_codigo, []).append(serializar_accion(accion))
+    retornos = {}
+    for t in Traslado.query.filter(Traslado.articulo_codigo.in_(codigos), Traslado.tipo == 'retorno',
+                                   Traslado.estado.in_(ESTADOS_ABIERTOS)):
+        retornos.setdefault(t.articulo_codigo, []).append(
+            {'id': t.id, 'folio': folio(t), 'origen': t.origen, 'estado': t.estado, 'cantidad': cantidad_vigente(t)})
+    for a in articulos:
+        a['acciones'] = acciones.get(a['codigo'], [])
+        a['retornos'] = retornos.get(a['codigo'], [])
+
+    sucursales = sorted(s for (s,) in db.session.query(Inventario.sucursal).filter(
+        Inventario.origen_inventario == 'INV').distinct() if s)
+    return jsonify(success=True, **{**datos, 'articulos': articulos, 'sucursales': sucursales})
+
+
+# ==================== TRASLADOS ====================
+ALMACEN = 'Almacén Principal'
+
+ESTADOS_TRASLADO = {
+    'borrador': 'Borrador',
+    'pendiente_aprobacion': 'Pendiente de aprobación',
+    'aprobado': 'Aprobado',
+    'rechazado': 'Rechazado',
+    'descartado': 'Descartado',
+    'despachado': 'Despachado',
+    'recibido': 'Recibido',
+    'recibido_con_diferencias': 'Recibido con diferencias',
+    'cerrado': 'Cerrado',
+}
+ESTADOS_ABIERTOS = ['borrador', 'pendiente_aprobacion', 'aprobado', 'despachado', 'recibido', 'recibido_con_diferencias']
+# Unidades reservadas en el origen: todavía no salieron y no deben asignarse a otro traslado. Lo despachado no se
+# descuenta porque las existencias vienen de exportaciones y la siguiente ya reflejará la salida.
+ESTADOS_COMPROMETEN_ORIGEN = ['pendiente_aprobacion', 'aprobado']
+
+# acción -> (estados desde los que se permite, roles autorizados; None = cualquier rol)
+TRANSICIONES = {
+    'enviar': (['borrador'], None),
+    'descartar': (['borrador'], None),
+    'aprobar': (['pendiente_aprobacion'], ['gerente']),
+    'rechazar': (['pendiente_aprobacion'], ['gerente']),
+    'despachar': (['aprobado'], None),
+    'recibir': (['despachado'], None),
+    'cerrar': (['recibido', 'recibido_con_diferencias'], ['gerente']),
+}
+VERBOS = {'enviar': 'enviar a aprobación', 'descartar': 'descartar', 'aprobar': 'aprobar', 'rechazar': 'rechazar',
+          'despachar': 'despachar', 'recibir': 'recibir', 'cerrar': 'cerrar'}
+# Agrupaciones de estados para las pestañas de la bandeja.
+GRUPOS_ESTADO = {
+    'activos': ESTADOS_ABIERTOS,
+    'borradores': ['borrador'],
+    'por_aprobar': ['pendiente_aprobacion'],
+    'por_despachar': ['aprobado'],
+    'en_transito': ['despachado'],
+    'por_cerrar': ['recibido', 'recibido_con_diferencias'],
+    'cerrados': ['cerrado'],
+    'rechazados': ['rechazado', 'descartado'],
+    'todos': list(ESTADOS_TRASLADO),
+}
+
+
+class ErrorTraslado(Exception):
+    def __init__(self, mensaje, status=400):
+        super().__init__(mensaje)
+        self.status = status
+
+
+def usuario_actual():
+    """Responsable de la acción según el login simulado del frontend (cabeceras X-Usuario / X-Rol, codificadas).
+
+    No es autenticación: identifica a quien opera mientras no exista un inicio de sesión real.
+    """
+    nombre = unquote(request.headers.get('X-Usuario', '')).strip()[:100] or 'Sin identificar'
+    rol = unquote(request.headers.get('X-Rol', '')).strip().lower()[:30]
+    return nombre, rol
+
+
+def folio(t):
+    return f'TR-{t.id:05d}'
+
+
+def cantidad_vigente(t):
+    """La cantidad más reciente del ciclo: recibida, despachada, aprobada o sugerida."""
+    return next(v for v in (t.cantidad_recibida, t.cantidad_despachada, t.cantidad_aprobada, t.cantidad_sugerida) if v is not None)
+
+
+def acciones_disponibles(t, rol):
+    return [a for a, (desde, roles) in TRANSICIONES.items() if t.estado in desde and (roles is None or rol in roles)]
+
+
+def serializar_evento(e):
+    return {
+        'id': e.id, 'tipo': e.tipo, 'estado_anterior': e.estado_anterior, 'estado_nuevo': e.estado_nuevo,
+        'usuario': e.usuario, 'rol': e.rol, 'fecha': e.fecha.isoformat(timespec='seconds'),
+        'detalle': json.loads(e.detalle) if e.detalle else {},
+    }
+
+
+def serializar_traslado(t, rol=None, con_eventos=False):
+    diferencia = (t.cantidad_recibida - t.cantidad_despachada
+                  if t.cantidad_recibida is not None and t.cantidad_despachada is not None else None)
+    datos = {
+        'id': t.id, 'folio': folio(t), 'articulo_codigo': t.articulo_codigo, 'articulo_nombre': t.articulo_nombre,
+        'clasificacion_abc': t.clasificacion_abc, 'tipo': t.tipo, 'origen': t.origen, 'destino': t.destino,
+        'estado': t.estado, 'estado_etiqueta': ESTADOS_TRASLADO[t.estado],
+        'cantidad_sugerida': t.cantidad_sugerida, 'cantidad_aprobada': t.cantidad_aprobada,
+        'cantidad_despachada': t.cantidad_despachada, 'cantidad_recibida': t.cantidad_recibida, 'diferencia': diferencia,
+        'stock_origen': t.stock_origen, 'stock_destino': t.stock_destino, 'cobertura_dias': t.cobertura_dias,
+        'horizonte_dias': t.horizonte_dias, 'motivo_rechazo': t.motivo_rechazo, 'observaciones': t.observaciones,
+        'creado_por': t.creado_por, 'creado_en': t.creado_en.isoformat(timespec='seconds'),
+        'actualizado_en': t.actualizado_en.isoformat(timespec='seconds'), 'version': t.version,
+        'acciones': acciones_disponibles(t, rol), 'editable': t.estado == 'borrador',
+    }
+    if con_eventos:
+        eventos = EventoTraslado.query.filter_by(traslado_id=t.id).order_by(EventoTraslado.fecha, EventoTraslado.id)
+        datos['eventos'] = [serializar_evento(e) for e in eventos]
+    return datos
+
+
+def registrar_evento(t, tipo, usuario, estado_anterior=None, antes=None, despues=None, comentario=None):
+    detalle = {k: v for k, v in (('antes', antes), ('despues', despues), ('comentario', comentario)) if v}
+    db.session.add(EventoTraslado(
+        traslado_id=t.id, tipo=tipo, estado_anterior=estado_anterior, estado_nuevo=t.estado,
+        usuario=usuario[0], rol=usuario[1], fecha=datetime.now(),
+        detalle=json.dumps(detalle, ensure_ascii=False) if detalle else None,
+    ))
+
+
+def tocar(t):
+    t.version += 1
+    t.actualizado_en = datetime.now()
+
+
+def entero(valor, campo, minimo=0):
+    if isinstance(valor, bool) or (isinstance(valor, float) and not valor.is_integer()):
+        raise ErrorTraslado(f"{campo} debe ser un número entero.")
+    try:
+        n = int(str(valor).strip())
+    except (TypeError, ValueError):
+        raise ErrorTraslado(f"{campo} debe ser un número entero.")
+    if n < minimo:
+        raise ErrorTraslado(f"{campo} debe ser mayor o igual a {minimo}.")
+    return n
+
+
+def stock_en(ubicacion, codigo):
+    q = db.session.query(func.coalesce(func.sum(Inventario.existencia), 0)).filter(Inventario.articulo_codigo == codigo)
+    if ubicacion == ALMACEN:
+        q = q.filter(Inventario.origen_inventario == 'INVAL')
+    else:
+        q = q.filter(Inventario.origen_inventario == 'INV', Inventario.sucursal == ubicacion)
+    return int(q.scalar() or 0)
+
+
+def comprometido_en(ubicacion, codigo, excluir_id=None):
+    q = Traslado.query.filter(Traslado.articulo_codigo == codigo, Traslado.origen == ubicacion,
+                              Traslado.estado.in_(ESTADOS_COMPROMETEN_ORIGEN))
+    if excluir_id:
+        q = q.filter(Traslado.id != excluir_id)
+    return sum(t.cantidad_aprobada if t.cantidad_aprobada is not None else t.cantidad_sugerida for t in q)
+
+
+def validar_disponible(t, cantidad):
+    """No se puede reservar más de lo que hay en el origen descontando lo reservado por otros traslados."""
+    existencia = stock_en(t.origen, t.articulo_codigo)
+    reservado = comprometido_en(t.origen, t.articulo_codigo, t.id)
+    disponible = existencia - reservado
+    if cantidad > disponible:
+        raise ErrorTraslado(
+            f"{t.origen} tiene {max(disponible, 0)} unidades disponibles de este artículo "
+            f"(existencia {existencia}, {reservado} reservadas en otros traslados). Ajusta la cantidad.")
+
+
+def verificar_version(t, datos):
+    version = datos.get('version')
+    if version is None:
+        raise ErrorTraslado("Falta la versión del traslado.")
+    if entero(version, 'La versión') != t.version:
+        raise ErrorTraslado(
+            f"{folio(t)} cambió mientras lo revisabas (ahora está «{ESTADOS_TRASLADO[t.estado]}»). "
+            "Se cargó la información actualizada; revisa antes de continuar.", 409)
+
+
+def aplicar_accion(t, accion, datos, usuario):
+    """Ejecuta una transición validando estado, rol y cantidades, y la deja registrada en el historial."""
+    if accion not in TRANSICIONES:
+        raise ErrorTraslado(f"Acción desconocida: {accion}.")
+    desde, roles = TRANSICIONES[accion]
+    if t.estado not in desde:
+        raise ErrorTraslado(f"No se puede {VERBOS[accion]} {folio(t)} porque está «{ESTADOS_TRASLADO[t.estado]}».", 409)
+    if roles and usuario[1] not in roles:
+        raise ErrorTraslado(f"Solo un gerente puede {VERBOS[accion]} un traslado.", 403)
+
+    anterior = t.estado
+    comentario = texto(datos.get('comentario'))
+    if accion == 'enviar':
+        validar_disponible(t, t.cantidad_sugerida)
+        t.estado = 'pendiente_aprobacion'
+        registrar_evento(t, 'enviado_aprobacion', usuario, anterior, comentario=comentario)
+    elif accion == 'descartar':
+        t.estado = 'descartado'
+        t.motivo_rechazo = comentario or None
+        registrar_evento(t, 'descartado', usuario, anterior, comentario=comentario)
+    elif accion == 'aprobar':
+        cantidad = entero(datos.get('cantidad', t.cantidad_sugerida), 'La cantidad aprobada', 1)
+        validar_disponible(t, cantidad)
+        t.cantidad_aprobada = cantidad
+        t.estado = 'aprobado'
+        registrar_evento(t, 'aprobado', usuario, anterior, antes={'cantidad_sugerida': t.cantidad_sugerida},
+                         despues={'cantidad_aprobada': cantidad}, comentario=comentario)
+    elif accion == 'rechazar':
+        motivo = texto(datos.get('motivo'))
+        if len(motivo) < 3:
+            raise ErrorTraslado("Indica el motivo del rechazo.")
+        t.motivo_rechazo = motivo
+        t.estado = 'rechazado'
+        registrar_evento(t, 'rechazado', usuario, anterior, comentario=motivo)
+    elif accion == 'despachar':
+        cantidad = entero(datos.get('cantidad', t.cantidad_aprobada), 'La cantidad despachada', 1)
+        if cantidad > t.cantidad_aprobada:
+            raise ErrorTraslado(f"No se puede despachar más de lo aprobado ({t.cantidad_aprobada}).")
+        t.cantidad_despachada = cantidad
+        t.estado = 'despachado'
+        registrar_evento(t, 'despachado', usuario, anterior, antes={'cantidad_aprobada': t.cantidad_aprobada},
+                         despues={'cantidad_despachada': cantidad}, comentario=comentario)
+    elif accion == 'recibir':
+        if datos.get('cantidad') in (None, ''):
+            raise ErrorTraslado("Indica la cantidad recibida.")
+        cantidad = entero(datos['cantidad'], 'La cantidad recibida', 0)
+        diferencia = cantidad - t.cantidad_despachada
+        if diferencia and len(comentario) < 3:
+            raise ErrorTraslado("La cantidad recibida no coincide con la despachada: describe la diferencia en las observaciones.")
+        t.cantidad_recibida = cantidad
+        t.estado = 'recibido_con_diferencias' if diferencia else 'recibido'
+        registrar_evento(t, t.estado, usuario, anterior, antes={'cantidad_despachada': t.cantidad_despachada},
+                         despues={'cantidad_recibida': cantidad, 'diferencia': diferencia}, comentario=comentario)
+    elif accion == 'cerrar':
+        if t.estado == 'recibido_con_diferencias' and len(comentario) < 3:
+            raise ErrorTraslado("Para cerrar un traslado con diferencias, registra cómo se concilió.")
+        t.estado = 'cerrado'
+        registrar_evento(t, 'cerrado', usuario, anterior, comentario=comentario)
+    tocar(t)
+
+
+def respuesta_error_traslado(e, t=None):
+    db.session.rollback()
+    cuerpo = {'success': False, 'error': str(e)}
+    if t is not None and e.status == 409:
+        # El cliente recibe el estado real para no mostrar algo que contradiga al servidor.
+        cuerpo['traslado'] = serializar_traslado(db.session.get(Traslado, t.id), usuario_actual()[1], con_eventos=True)
+    return jsonify(cuerpo), e.status
+
+
+def obtener_traslado(id_):
+    t = db.session.get(Traslado, id_)
+    if t is None:
+        raise ErrorTraslado(f"El traslado TR-{id_:05d} no existe.", 404)
+    return t
+
+
+ORDEN_ABC = case((Traslado.clasificacion_abc == 'A', 0), (Traslado.clasificacion_abc == 'B', 1),
+                 (Traslado.clasificacion_abc == 'C', 2), else_=3)
+ORDEN_ESTADO = case(*[(Traslado.estado == e, i) for i, e in enumerate(ESTADOS_TRASLADO)], else_=99)
+ORDENES = {
+    # Prioridad: clase ABC y luego la sucursal con menos días de cobertura.
+    'prioridad': [ORDEN_ABC, Traslado.cobertura_dias.is_(None), Traslado.cobertura_dias, Traslado.id],
+    'estado': [ORDEN_ESTADO, ORDEN_ABC, Traslado.id],
+    'cantidad': [Traslado.cantidad_sugerida.desc(), Traslado.id],
+    'reciente': [Traslado.actualizado_en.desc(), Traslado.id.desc()],
+    'producto': [Traslado.articulo_nombre, Traslado.id],
+}
+
+
+def filtrar_traslados(args):
+    q = Traslado.query
+    for campo in ('origen', 'destino', 'tipo'):
+        if args.get(campo):
+            q = q.filter(getattr(Traslado, campo) == args[campo])
+    if args.get('abc'):
+        q = q.filter(Traslado.clasificacion_abc == args['abc'].upper())
+    if args.get('sucursal'):
+        q = q.filter(or_(Traslado.origen == args['sucursal'], Traslado.destino == args['sucursal']))
+    termino = texto(args.get('q')).lower()
+    if termino:
+        condiciones = [func.lower(Traslado.articulo_nombre).like(f'%{termino}%'),
+                       func.lower(Traslado.articulo_codigo).like(f'%{termino}%')]
+        coincidencia_folio = re.fullmatch(r'(?:tr-?)?0*(\d+)', termino)
+        if coincidencia_folio:
+            condiciones.append(Traslado.id == int(coincidencia_folio.group(1)))
+        q = q.filter(or_(*condiciones))
+    return q
+
+
+@app.route('/api/traslados', methods=['GET'])
+def listar_traslados():
+    """Bandeja de traslados con filtros, orden y paginación; conteos por pestaña con los mismos filtros."""
+    rol = usuario_actual()[1]
+    grupo = request.args.get('grupo', 'activos')
+    if grupo not in GRUPOS_ESTADO:
+        return jsonify(success=False, error=f"grupo inválido. Opciones: {', '.join(GRUPOS_ESTADO)}."), 400
+    orden = request.args.get('orden', 'prioridad')
+    por_pagina = min(max(request.args.get('por_pagina', default=25, type=int), 1), 100)
+
+    base = filtrar_traslados(request.args)
+    por_estado = dict(base.with_entities(Traslado.estado, func.count()).group_by(Traslado.estado).all())
+    conteos = {g: sum(por_estado.get(e, 0) for e in estados) for g, estados in GRUPOS_ESTADO.items()}
+
+    consulta = base.filter(Traslado.estado.in_(GRUPOS_ESTADO[grupo])).order_by(*ORDENES.get(orden, ORDENES['prioridad']))
+    total = consulta.count()
+    paginas = max((total + por_pagina - 1) // por_pagina, 1)
+    # Si la página pedida dejó de existir (p. ej. tras aprobar el último de ella), se devuelve la última válida.
+    pagina = min(max(request.args.get('pagina', default=1, type=int), 1), paginas)
+    items = consulta.offset((pagina - 1) * por_pagina).limit(por_pagina).all()
+
+    return jsonify(
+        success=True, items=[serializar_traslado(t, rol) for t in items], total=total, pagina=pagina,
+        paginas=paginas, por_pagina=por_pagina, conteos=conteos,
+        opciones={
+            'origenes': sorted(o for (o,) in db.session.query(Traslado.origen).distinct()),
+            'destinos': sorted(d for (d,) in db.session.query(Traslado.destino).distinct()),
+        },
     )
+
+
+@app.route('/api/traslados/<int:id_>', methods=['GET'])
+def detalle_traslado(id_):
+    try:
+        t = obtener_traslado(id_)
+    except ErrorTraslado as e:
+        return respuesta_error_traslado(e)
+    return jsonify(success=True, traslado=serializar_traslado(t, usuario_actual()[1], con_eventos=True))
+
+
+@app.route('/api/traslados/<int:id_>', methods=['PATCH'])
+def editar_traslado(id_):
+    """Ajusta la cantidad sugerida (solo en borrador) o las observaciones; cada cambio queda en el historial."""
+    datos = request.get_json(silent=True) or {}
+    usuario = usuario_actual()
+    t = None
+    try:
+        t = obtener_traslado(id_)
+        verificar_version(t, datos)
+        cambios = False
+        if 'cantidad_sugerida' in datos:
+            if t.estado != 'borrador':
+                raise ErrorTraslado("La cantidad solo se puede editar mientras el traslado es un borrador.", 409)
+            cantidad = entero(datos['cantidad_sugerida'], 'La cantidad', 1)
+            if cantidad != t.cantidad_sugerida:
+                validar_disponible(t, cantidad)
+                registrar_evento(t, 'cantidad_modificada', usuario, t.estado,
+                                 antes={'cantidad_sugerida': t.cantidad_sugerida}, despues={'cantidad_sugerida': cantidad},
+                                 comentario=texto(datos.get('comentario')))
+                t.cantidad_sugerida = cantidad
+                cambios = True
+        if 'observaciones' in datos:
+            nuevas = texto(datos['observaciones']) or None
+            if nuevas != t.observaciones:
+                registrar_evento(t, 'observaciones', usuario, t.estado,
+                                 antes={'observaciones': t.observaciones}, despues={'observaciones': nuevas})
+                t.observaciones = nuevas
+                cambios = True
+        if cambios:
+            tocar(t)
+            db.session.commit()
+    except ErrorTraslado as e:
+        return respuesta_error_traslado(e, t)
+    return jsonify(success=True, traslado=serializar_traslado(t, usuario[1], con_eventos=True))
+
+
+@app.route('/api/traslados/<int:id_>/acciones', methods=['POST'])
+def accion_traslado(id_):
+    """{"accion": "aprobar", "version": 3, "cantidad": 10, "motivo": "...", "comentario": "..."}"""
+    datos = request.get_json(silent=True) or {}
+    usuario = usuario_actual()
+    t = None
+    try:
+        t = obtener_traslado(id_)
+        verificar_version(t, datos)
+        aplicar_accion(t, datos.get('accion'), datos, usuario)
+        db.session.commit()
+    except ErrorTraslado as e:
+        return respuesta_error_traslado(e, t)
+    return jsonify(success=True, traslado=serializar_traslado(t, usuario[1], con_eventos=True))
+
+
+ACCIONES_EN_LOTE = ['enviar', 'descartar']  # aprobar y rechazar exigen revisión individual
+
+
+@app.route('/api/traslados/lote', methods=['POST'])
+def accion_lote():
+    """{"accion": "enviar", "items": [{"id": 1, "version": 2}, ...]}: todo o nada."""
+    datos = request.get_json(silent=True) or {}
+    usuario = usuario_actual()
+    accion, items = datos.get('accion'), datos.get('items') or []
+    if accion not in ACCIONES_EN_LOTE:
+        return jsonify(success=False, error="Por lote solo se puede enviar a aprobación o descartar borradores."), 400
+    if not isinstance(items, list) or not items:
+        return jsonify(success=False, error="No se indicaron traslados."), 400
+
+    errores, procesados = [], []
+    for item in items:
+        try:
+            t = obtener_traslado(entero(item.get('id'), 'El id', 1))
+            verificar_version(t, item)
+            aplicar_accion(t, accion, item, usuario)
+            procesados.append(t)
+        except ErrorTraslado as e:
+            errores.append({'id': item.get('id'), 'error': str(e)})
+    if errores:
+        db.session.rollback()
+        return jsonify(success=False, error=f"No se aplicó ningún cambio: {len(errores)} de {len(items)} traslados no lo permiten.",
+                       errores=errores), 409
+    db.session.commit()
+    return jsonify(success=True, traslados=[serializar_traslado(t, usuario[1]) for t in procesados])
+
+
+@app.route('/api/traslados/generar', methods=['POST'])
+def generar_traslados():
+    """Convierte las sugerencias actuales en borradores, sin duplicar artículos que ya tienen un traslado abierto."""
+    datos = request.get_json(silent=True) or {}
+    usuario = usuario_actual()
+    try:
+        dias = entero(datos.get('dias', 15), 'El horizonte', 1)
+    except ErrorTraslado as e:
+        return respuesta_error_traslado(e)
+
+    abiertos = Traslado.query.filter(Traslado.estado.in_(ESTADOS_ABIERTOS)).all()
+    ocupados = {(t.articulo_codigo, t.origen, t.destino) for t in abiertos}
+    comprometido = {}
+    for t in abiertos:
+        if t.origen == ALMACEN and t.estado in ESTADOS_COMPROMETEN_ORIGEN:
+            comprometido[t.articulo_codigo] = comprometido.get(t.articulo_codigo, 0) + (
+                t.cantidad_aprobada if t.cantidad_aprobada is not None else t.cantidad_sugerida)
+
+    sugerencias = calcular_sugerencias_traslado(dias, comprometido)
+    ahora = datetime.now()
+    creados = 0
+    for s in sugerencias:
+        if (s['codigo'], ALMACEN, s['sucursal']) in ocupados:
+            continue
+        t = Traslado(
+            articulo_codigo=s['codigo'], articulo_nombre=s['nombre'], clasificacion_abc=s['clasificacion_abc'],
+            tipo='reposicion', origen=ALMACEN, destino=s['sucursal'], estado='borrador',
+            cantidad_sugerida=s['cantidad'], stock_origen=s['disponible_almacen'], stock_destino=s['stock_sucursal'],
+            cobertura_dias=s['cobertura_dias'], horizonte_dias=dias, creado_por=usuario[0],
+            creado_en=ahora, actualizado_en=ahora,
+        )
+        db.session.add(t)
+        db.session.flush()
+        registrar_evento(t, 'creado', usuario, despues={
+            'cantidad_sugerida': t.cantidad_sugerida, 'stock_origen': t.stock_origen,
+            'stock_destino': t.stock_destino, 'cobertura_dias': t.cobertura_dias,
+        }, comentario=f"Propuesta generada para cubrir {dias} días de demanda.")
+        creados += 1
+    db.session.commit()
+    omitidos = len(sugerencias) - creados
+    return jsonify(success=True, creados=creados, omitidos=omitidos, sugerencias=len(sugerencias),
+                   message=(f"Se crearon {creados} borradores de traslado." +
+                            (f" {omitidos} sugerencias ya tenían un traslado abierto." if omitidos else "")))
+
+
+@app.route('/api/traslados', methods=['POST'])
+def crear_retorno():
+    """Retorno de mercancía de una sucursal al almacén principal (p. ej. mercancía estancada)."""
+    datos = request.get_json(silent=True) or {}
+    usuario = usuario_actual()
+    try:
+        codigo = texto(datos.get('articulo_codigo'))
+        origen = texto(datos.get('origen'))
+        art = db.session.get(Articulo, codigo) if codigo else None
+        if art is None:
+            raise ErrorTraslado("El artículo no existe.")
+        if not origen or origen == ALMACEN:
+            raise ErrorTraslado("Indica la sucursal desde la que se retorna la mercancía.")
+        cantidad = entero(datos.get('cantidad'), 'La cantidad', 1)
+        if Traslado.query.filter(Traslado.articulo_codigo == codigo, Traslado.origen == origen,
+                                 Traslado.destino == ALMACEN, Traslado.estado.in_(ESTADOS_ABIERTOS)).first():
+            raise ErrorTraslado(f"Ya hay un retorno abierto de este artículo desde {origen}.", 409)
+        ahora = datetime.now()
+        t = Traslado(
+            articulo_codigo=codigo, articulo_nombre=art.nombre, clasificacion_abc=clasificacion_abc().get(codigo, 'C'),
+            tipo='retorno', origen=origen, destino=ALMACEN, estado='borrador', cantidad_sugerida=cantidad,
+            stock_origen=stock_en(origen, codigo), stock_destino=stock_en(ALMACEN, codigo),
+            creado_por=usuario[0], creado_en=ahora, actualizado_en=ahora,
+        )
+        validar_disponible(t, cantidad)
+        db.session.add(t)
+        db.session.flush()
+        registrar_evento(t, 'creado', usuario, despues={'cantidad_sugerida': cantidad, 'stock_origen': t.stock_origen},
+                         comentario=texto(datos.get('comentario')) or "Retorno de mercancía estancada al almacén.")
+        db.session.commit()
+    except ErrorTraslado as e:
+        return respuesta_error_traslado(e)
+    return jsonify(success=True, traslado=serializar_traslado(t, usuario[1], con_eventos=True)), 201
+
+
+# ==================== CENTRO DE DECISIONES ====================
+# Cobertura (días de venta que cubre el stock) por debajo de la cual un artículo A o B se considera crítico.
+# Es un parámetro operativo provisional: ajustarlo cuando se defina la regla real de la empresa.
+DIAS_COBERTURA_CRITICA = 7
+
+
+def productos_criticos(sucursal=None, dias=DIAS_COBERTURA_CRITICA):
+    """Artículos A y B cuyo stock en una sucursal cubre menos de `dias` de su venta diaria.
+
+    Solo se evalúan pares artículo-sucursal presentes en el inventario cargado: sin inventario no hay certeza
+    de que el stock sea cero y no se genera la alerta.
+    """
+    stock_almacen, stock_sucursal, _, vpd_sucursal, _ = datos_demanda()
+    abc = clasificacion_abc()
+    nombres = dict(db.session.query(Articulo.codigo, Articulo.nombre).all())
+    abiertos = {(t.articulo_codigo, t.destino): t for t in Traslado.query.filter(
+        Traslado.estado.in_(ESTADOS_ABIERTOS), Traslado.origen == ALMACEN)}
+    items = []
+    for (codigo, suc), stock in stock_sucursal.items():
+        if (sucursal and suc != sucursal) or codigo not in nombres or abc.get(codigo) not in ('A', 'B'):
+            continue
+        vpd = vpd_sucursal.get((codigo, suc), 0)
+        if vpd <= 0:
+            continue
+        cobertura = max(stock, 0) / vpd
+        if cobertura >= dias:
+            continue
+        t = abiertos.get((codigo, suc))
+        items.append({
+            'codigo': codigo, 'nombre': nombres[codigo], 'sucursal': suc, 'clasificacion_abc': abc[codigo],
+            'stock': stock, 'venta_diaria': round(vpd, 2), 'cobertura_dias': round(cobertura, 1),
+            'stock_almacen': stock_almacen.get(codigo, 0),
+            'traslado': {'id': t.id, 'folio': folio(t), 'estado': t.estado} if t else None,
+        })
+    items.sort(key=lambda i: (i['clasificacion_abc'], i['cobertura_dias'], i['nombre']))
+    return items
+
+
+def estado_de_los_datos():
+    """Qué datos hay cargados por ubicación, cuándo se importaron y hasta qué fecha llegan."""
+    def ultima(tipo, sucursal=None):
+        q = Importacion.query.filter_by(tipo_reporte=tipo, exito=True)
+        if sucursal is not None:
+            q = q.filter_by(sucursal=sucursal)
+        i = q.order_by(Importacion.fecha_importacion.desc()).first()
+        return {'importado_en': i.fecha_importacion.isoformat(timespec='seconds') if i else None,
+                'datos_hasta': i.datos_hasta.isoformat() if i and i.datos_hasta else None}
+
+    con_inventario = {s for (s,) in db.session.query(Inventario.sucursal).filter(Inventario.origen_inventario == 'INV').distinct() if s}
+    ventas_hasta = dict(db.session.query(Venta.sucursal, func.max(Venta.fecha_emision)).group_by(Venta.sucursal).all())
+    sucursales = sorted(con_inventario | {s for s in ventas_hasta if s})
+    tasas_hasta = db.session.query(func.max(TasaInterna.fecha)).filter(TasaInterna.tasa_paralelo.isnot(None)).scalar()
+    return {
+        'sucursales': [{
+            'sucursal': s,
+            'inventario': {'cargado': s in con_inventario, **ultima('inv_fisico', s)},
+            # La fecha de los datos de ventas se toma de las propias ventas (última emisión), no de la importación.
+            'ventas': {'cargado': s in ventas_hasta, **ultima('ventas', s),
+                       'datos_hasta': ventas_hasta[s].isoformat() if s in ventas_hasta else None},
+        } for s in sucursales],
+        'almacen': {'cargado': Inventario.query.filter_by(origen_inventario='INVAL').first() is not None, **ultima('inv_inval')},
+        'tasas': {**ultima('tasas'), 'datos_hasta': tasas_hasta.isoformat() if tasas_hasta else None},
+        'ventas_sin_sucursal': None in ventas_hasta,
+    }
+
+
+def resumen_traslado(t):
+    return {'id': t.id, 'folio': folio(t), 'articulo_nombre': t.articulo_nombre, 'articulo_codigo': t.articulo_codigo,
+            'clasificacion_abc': t.clasificacion_abc, 'origen': t.origen, 'destino': t.destino, 'estado': t.estado,
+            'cantidad': cantidad_vigente(t), 'diferencia': (t.cantidad_recibida - t.cantidad_despachada
+                                                            if t.cantidad_recibida is not None and t.cantidad_despachada is not None else None),
+            'actualizado_en': t.actualizado_en.isoformat(timespec='seconds')}
+
+
+@app.route('/api/dashboard', methods=['GET'])
+def dashboard():
+    """Indicadores, pendientes y actividad para el centro de decisiones; ?sucursal= para la vista individual."""
+    sucursal = texto(request.args.get('sucursal')) or None
+    traslados = Traslado.query
+    if sucursal:
+        traslados = traslados.filter(or_(Traslado.origen == sucursal, Traslado.destino == sucursal))
+    por_estado = dict(traslados.with_entities(Traslado.estado, func.count()).group_by(Traslado.estado).all())
+
+    def lista(estados, orden, limite=5):
+        return [resumen_traslado(t) for t in traslados.filter(Traslado.estado.in_(estados)).order_by(*orden).limit(limite)]
+
+    criticos = productos_criticos(sucursal)
+    capital = calcular_capital_estancado(90, sucursal)
+    acciones = AccionEstancado.query.filter_by(estado='pendiente').order_by(AccionEstancado.creado_en)
+
+    actividad = db.session.query(EventoTraslado, Traslado).join(Traslado, Traslado.id == EventoTraslado.traslado_id)
+    if sucursal:
+        actividad = actividad.filter(or_(Traslado.origen == sucursal, Traslado.destino == sucursal))
+    actividad = actividad.order_by(EventoTraslado.fecha.desc(), EventoTraslado.id.desc()).limit(10).all()
+
+    return jsonify(
+        success=True,
+        sucursal=sucursal,
+        generado_en=datetime.now().isoformat(timespec='seconds'),
+        traslados={
+            'borradores': por_estado.get('borrador', 0),
+            'por_aprobar': por_estado.get('pendiente_aprobacion', 0),
+            'por_despachar': por_estado.get('aprobado', 0),
+            'en_transito': por_estado.get('despachado', 0),
+            'con_diferencias': por_estado.get('recibido_con_diferencias', 0),
+            'por_cerrar': por_estado.get('recibido', 0) + por_estado.get('recibido_con_diferencias', 0),
+        },
+        pendientes={
+            'por_aprobar': lista(['pendiente_aprobacion'], ORDENES['prioridad']),
+            'en_transito': lista(['despachado'], [Traslado.actualizado_en]),
+            'con_diferencias': lista(['recibido_con_diferencias'], [Traslado.actualizado_en]),
+        },
+        criticos={'total': len(criticos), 'dias_cobertura': DIAS_COBERTURA_CRITICA, 'items': criticos[:5]},
+        capital_estancado=None if capital is None else {
+            'total': capital['resumen']['capital_total'], 'articulos': capital['resumen']['articulos'],
+            'dias_min': capital['dias_min'], 'fecha_corte': capital['fecha_corte'],
+            'consolidado': sucursal is None,
+        },
+        acciones_estancado={'pendientes': acciones.count(), 'items': [serializar_accion(a) for a in acciones.limit(5)]},
+        actividad=[{**serializar_evento(e), 'traslado': {'id': t.id, 'folio': folio(t), 'articulo_nombre': t.articulo_nombre,
+                                                        'origen': t.origen, 'destino': t.destino}} for e, t in actividad],
+        importaciones=[serializar_importacion(i) for i in Importacion.query.order_by(Importacion.fecha_importacion.desc()).limit(5)],
+        datos=estado_de_los_datos(),
+    )
+
+
+@app.route('/api/inventario/criticos', methods=['GET'])
+def listar_criticos():
+    sucursal = texto(request.args.get('sucursal')) or None
+    dias = request.args.get('dias', default=DIAS_COBERTURA_CRITICA, type=int)
+    return jsonify(success=True, dias_cobertura=dias, items=productos_criticos(sucursal, dias))
+
+
+def serializar_importacion(i):
+    return {'id': i.id, 'tipo_reporte': i.tipo_reporte, 'sucursal': i.sucursal, 'archivo': i.archivo, 'exito': i.exito,
+            'mensaje': i.mensaje, 'fecha_importacion': i.fecha_importacion.isoformat(timespec='seconds'),
+            'datos_hasta': i.datos_hasta.isoformat() if i.datos_hasta else None, 'usuario': i.usuario}
+
+
+@app.route('/api/importaciones', methods=['GET'])
+def listar_importaciones():
+    return jsonify(success=True, importaciones=[
+        serializar_importacion(i) for i in Importacion.query.order_by(Importacion.fecha_importacion.desc()).limit(50)])
+
+
+# ==================== SEGUIMIENTO DE MERCANCÍA ESTANCADA ====================
+TIPOS_ACCION_ESTANCADO = {'promocion': 'Descuento / promoción', 'devolucion_proveedor': 'Devolución a proveedor'}
+
+
+def serializar_accion(a):
+    return {
+        'id': a.id, 'articulo_codigo': a.articulo_codigo, 'articulo_nombre': a.articulo_nombre, 'tipo': a.tipo,
+        'tipo_etiqueta': TIPOS_ACCION_ESTANCADO[a.tipo], 'estado': a.estado,
+        'capital_al_registrar': float(a.capital_al_registrar) if a.capital_al_registrar is not None else None,
+        'comentario': a.comentario, 'resultado': a.resultado, 'creado_por': a.creado_por,
+        'creado_en': a.creado_en.isoformat(timespec='seconds'), 'cerrado_por': a.cerrado_por,
+        'cerrado_en': a.cerrado_en.isoformat(timespec='seconds') if a.cerrado_en else None,
+    }
+
+
+@app.route('/api/estancado/acciones', methods=['GET'])
+def listar_acciones_estancado():
+    q = AccionEstancado.query
+    if request.args.get('estado'):
+        q = q.filter(AccionEstancado.estado == request.args['estado'])
+    return jsonify(success=True, acciones=[serializar_accion(a) for a in q.order_by(AccionEstancado.creado_en.desc()).limit(200)])
+
+
+@app.route('/api/estancado/acciones', methods=['POST'])
+def registrar_accion_estancado():
+    """{"articulo_codigo", "tipo": "promocion" | "devolucion_proveedor", "comentario", "capital"}"""
+    datos = request.get_json(silent=True) or {}
+    usuario = usuario_actual()
+    codigo, tipo = texto(datos.get('articulo_codigo')), datos.get('tipo')
+    art = db.session.get(Articulo, codigo) if codigo else None
+    if art is None:
+        return jsonify(success=False, error="El artículo no existe."), 400
+    if tipo not in TIPOS_ACCION_ESTANCADO:
+        return jsonify(success=False, error="Tipo de acción inválido."), 400
+    if AccionEstancado.query.filter_by(articulo_codigo=codigo, tipo=tipo, estado='pendiente').first():
+        return jsonify(success=False, error=f"Ya hay una acción «{TIPOS_ACCION_ESTANCADO[tipo]}» pendiente para este artículo."), 409
+    accion = AccionEstancado(
+        articulo_codigo=codigo, articulo_nombre=art.nombre, tipo=tipo, estado='pendiente',
+        capital_al_registrar=numero(datos.get('capital'), None), comentario=texto(datos.get('comentario')) or None,
+        creado_por=usuario[0], creado_en=datetime.now(),
+    )
+    db.session.add(accion)
+    db.session.commit()
+    return jsonify(success=True, accion=serializar_accion(accion)), 201
+
+
+@app.route('/api/estancado/acciones/<int:id_>', methods=['PATCH'])
+def cerrar_accion_estancado(id_):
+    """{"estado": "completada" | "descartada", "resultado": "..."}; solo desde pendiente."""
+    datos = request.get_json(silent=True) or {}
+    accion = db.session.get(AccionEstancado, id_)
+    if accion is None:
+        return jsonify(success=False, error="La acción no existe."), 404
+    estado, resultado = datos.get('estado'), texto(datos.get('resultado'))
+    if accion.estado != 'pendiente':
+        return jsonify(success=False, error="La acción ya fue cerrada.", accion=serializar_accion(accion)), 409
+    if estado not in ('completada', 'descartada'):
+        return jsonify(success=False, error="Estado inválido."), 400
+    if estado == 'completada' and len(resultado) < 3:
+        return jsonify(success=False, error="Describe el resultado obtenido."), 400
+    accion.estado, accion.resultado = estado, resultado or None
+    accion.cerrado_por, accion.cerrado_en = usuario_actual()[0], datetime.now()
+    db.session.commit()
+    return jsonify(success=True, accion=serializar_accion(accion))
 
 
 @app.route('/api/tasas', methods=['GET'])
@@ -897,4 +1723,4 @@ if __name__ == '__main__':
     with app.app_context():
         db.create_all()
         migrar_esquema()
-    app.run(host='127.0.0.1', port=5000, debug=os.getenv('FLASK_DEBUG') == '1', use_reloader=False)
+    app.run(host='127.0.0.1', port=int(os.getenv('PORT', 5000)), debug=os.getenv('FLASK_DEBUG') == '1', use_reloader=False)

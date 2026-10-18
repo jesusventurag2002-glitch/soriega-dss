@@ -1,15 +1,16 @@
-import { Boxes, LogOut, LayoutDashboard, Database, AlertOctagon, BarChart3 } from 'lucide-react';
+import { Boxes, LogOut, LayoutDashboard, Database, AlertOctagon, BarChart3, ArrowLeftRight } from 'lucide-react';
 import AlertBell from './AlertBell.jsx';
 import TasasDelDia from './TasasDelDia.jsx';
 
 const VISTAS = [
-  { id: 'dashboard', texto: 'Traslados', icono: LayoutDashboard },
+  { id: 'inicio', texto: 'Inicio', icono: LayoutDashboard },
+  { id: 'traslados', texto: 'Traslados', icono: ArrowLeftRight },
   { id: 'ventas', texto: 'Ventas', icono: BarChart3 },
   { id: 'estancado', texto: 'Capital estancado', icono: AlertOctagon },
   { id: 'configuracion', texto: 'Configuración inicial', icono: Database },
 ];
 
-export default function Layout({ usuario, vista, onCambiarVista, onLogout, children }) {
+export default function Layout({ usuario, vista, onCambiarVista, onIr, onLogout, children }) {
   const iniciales = usuario.nombre
     .split(' ')
     .map((p) => p[0])
@@ -31,7 +32,7 @@ export default function Layout({ usuario, vista, onCambiarVista, onLogout, child
 
           <div className="flex items-center gap-2 sm:gap-4">
             <TasasDelDia />
-            <AlertBell />
+            <AlertBell vista={vista} onIr={onIr} />
 
             <div className="flex items-center gap-3 pl-2 sm:pl-4 border-l border-slate-200">
               <div className="h-9 w-9 rounded-full bg-slate-200 text-slate-700 text-sm font-semibold flex items-center justify-center">
@@ -57,6 +58,7 @@ export default function Layout({ usuario, vista, onCambiarVista, onLogout, child
             <button
               key={id}
               onClick={() => onCambiarVista(id)}
+              aria-current={vista === id ? 'page' : undefined}
               className={`inline-flex items-center gap-2 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition ${
                 vista === id
                   ? 'border-slate-900 text-slate-900'

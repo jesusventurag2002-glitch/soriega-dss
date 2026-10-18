@@ -1,3 +1,5 @@
+import { ESTADOS, ESTADO_DESCONOCIDO } from './traslados/estados.js';
+
 const ABC = {
   A: { clase: 'bg-emerald-600 text-white', titulo: 'Clase A · Alta rotación' },
   B: { clase: 'bg-sky-600 text-white', titulo: 'Clase B · Rotación media' },
@@ -18,17 +20,12 @@ export function AbcBadge({ clase }) {
   );
 }
 
-const ESTADOS = {
-  pendiente: { texto: 'Pendiente', clase: 'bg-amber-50 text-amber-700 ring-amber-200', punto: 'bg-amber-500' },
-  aprobado: { texto: 'Aprobado', clase: 'bg-emerald-50 text-emerald-700 ring-emerald-200', punto: 'bg-emerald-500' },
-  rechazado: { texto: 'Rechazado', clase: 'bg-red-50 text-red-700 ring-red-200', punto: 'bg-red-500' },
-};
-
+// Estado de un traslado: icono + texto + color, para no depender solo del color.
 export function EstadoBadge({ estado }) {
-  const { texto, clase, punto } = ESTADOS[estado] ?? { texto: estado, clase: 'bg-slate-50 text-slate-600 ring-slate-200', punto: 'bg-slate-400' };
+  const { texto, icono: Icono, clase } = ESTADOS[estado] ?? ESTADO_DESCONOCIDO;
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${clase}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${punto}`} />
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${clase}`}>
+      <Icono className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
       {texto}
     </span>
   );

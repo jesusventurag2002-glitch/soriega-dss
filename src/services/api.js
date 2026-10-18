@@ -2,45 +2,82 @@
 // lo que permite abrir la app desde otros dispositivos de la red. Ajustable con VITE_API_URL en un .env.
 const API_URL = import.meta.env.VITE_API_URL ?? '';
 
-const ORDEN_ABC = { A: 0, B: 1, C: 2 };
+// Usuario del login simulado: se envía al backend para registrar quién ejecuta cada acción.
+// No es autenticación real; el nombre va codificado porque las cabeceras no admiten acentos.
+let usuarioActual = null;
+export const establecerUsuario = (usuario) => {
+  usuarioActual = usuario;
+};
 
-// Sugerencias de traslado Almacén Principal (INVAL) -> cada sucursal (INV), adaptadas al formato de la vista.
-export async function obtenerTrasladosSugeridos(dias) {
-  const respuesta = await fetch(`${API_URL}/api/logistica`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tipo_analisis: 'traslado', dias }),
-  });
-  const data = await respuesta.json();
-  if (!data.success) throw new Error(data.error || 'No se pudieron obtener los traslados.');
+const cabecerasUsuario = () =>
+  usuarioActual ? { 'X-Usuario': encodeURIComponent(usuarioActual.nombre), 'X-Rol': usuarioActual.rol } : {};
 
-  return data.resultados
-    .map((r) => ({
-      id: `${r.codigo}-${r.sucursal}`, // un mismo artículo puede ir a varias sucursales
-      codigo: r.codigo,
-      descripcion: r.nombre,
-      clasificacion_abc: r.clasificacion_abc,
-      origen: 'Almacén Principal',
-      destino: r.sucursal ?? 'Sucursal',
-      stock_origen: r.disponible_almacen,
-      stock_destino: r.stock_sucursal,
-      cantidad_sugerida: r.cantidad,
-      estado: 'pendiente',
-    }))
-    .sort(
-      (a, b) =>
-        (ORDEN_ABC[a.clasificacion_abc] ?? 3) - (ORDEN_ABC[b.clasificacion_abc] ?? 3) ||
-        b.cantidad_sugerida - a.cantidad_sugerida
-    );
+export class ErrorApi extends Error {
+  constructor(mensaje, status, cuerpo) {
+    super(mensaje);
+    this.status = status;
+    this.cuerpo = cuerpo;
+  }
 }
 
-// Artículos con stock sin ventas en los últimos `diasMin` días, ordenados por capital inmovilizado.
-export async function obtenerCapitalEstancado(diasMin, limite = 100) {
-  const respuesta = await fetch(`${API_URL}/api/capital_estancado?dias_min=${diasMin}&limite=${limite}`);
-  const data = await respuesta.json();
-  if (!data.success) throw new Error(data.error || 'No se pudo obtener el capital estancado.');
+// Petición JSON común: un error del servidor nunca se presenta como éxito.
+async function pedir(ruta, { metodo = 'GET', cuerpo, params } = {}) {
+  const query = params
+    ? new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v !== null && v !== undefined)).toString()
+    : '';
+  let respuesta;
+  try {
+    respuesta = await fetch(`${API_URL}${ruta}${query ? `?${query}` : ''}`, {
+      method: metodo,
+      headers: {
+        ...(cuerpo !== undefined && { 'Content-Type': 'application/json' }),
+        ...cabecerasUsuario(),
+      },
+      body: cuerpo !== undefined ? JSON.stringify(cuerpo) : undefined,
+    });
+  } catch {
+    throw new ErrorApi('No se pudo conectar con el servidor. Verifica que el backend esté activo.', 0);
+  }
+  let data;
+  try {
+    data = await respuesta.json();
+  } catch {
+    throw new ErrorApi(`Respuesta inválida del servidor (HTTP ${respuesta.status}).`, respuesta.status);
+  }
+  if (!respuesta.ok || data.success === false) {
+    throw new ErrorApi(data.error || `Error del servidor (HTTP ${respuesta.status}).`, respuesta.status, data);
+  }
   return data;
 }
+
+// ---- Traslados ----
+export const listarTraslados = (filtros) => pedir('/api/traslados', { params: filtros });
+export const obtenerTraslado = (id) => pedir(`/api/traslados/${id}`).then((d) => d.traslado);
+export const editarTraslado = (id, version, cambios) =>
+  pedir(`/api/traslados/${id}`, { metodo: 'PATCH', cuerpo: { version, ...cambios } }).then((d) => d.traslado);
+export const accionTraslado = (id, accion, version, extra = {}) =>
+  pedir(`/api/traslados/${id}/acciones`, { metodo: 'POST', cuerpo: { accion, version, ...extra } }).then((d) => d.traslado);
+export const generarTraslados = (dias) => pedir('/api/traslados/generar', { metodo: 'POST', cuerpo: { dias } });
+export const loteTraslados = (accion, items) => pedir('/api/traslados/lote', { metodo: 'POST', cuerpo: { accion, items } });
+export const crearRetorno = (datos) => pedir('/api/traslados', { metodo: 'POST', cuerpo: datos }).then((d) => d.traslado);
+
+// ---- Mercancía estancada ----
+// Artículos con stock sin ventas en los últimos `diasMin` días, ordenados por capital inmovilizado.
+// Sin sucursal, existencia consolidada (sucursales + almacén).
+export const obtenerCapitalEstancado = (diasMin, sucursal, limite = 100) =>
+  pedir('/api/capital_estancado', { params: { dias_min: diasMin, sucursal, limite } });
+
+export const registrarAccionEstancado = (datos) =>
+  pedir('/api/estancado/acciones', { metodo: 'POST', cuerpo: datos }).then((d) => d.accion);
+export const cerrarAccionEstancado = (id, estado, resultado) =>
+  pedir(`/api/estancado/acciones/${id}`, { metodo: 'PATCH', cuerpo: { estado, resultado } }).then((d) => d.accion);
+export const listarAccionesEstancado = (estado) =>
+  pedir('/api/estancado/acciones', { params: { estado } }).then((d) => d.acciones);
+
+// ---- Centro de decisiones ----
+export const obtenerDashboard = (sucursal) => pedir('/api/dashboard', { params: { sucursal } });
+export const obtenerCriticos = (sucursal) => pedir('/api/inventario/criticos', { params: { sucursal } });
+export const listarImportaciones = () => pedir('/api/importaciones').then((d) => d.importaciones);
 
 // Ventas de un mes por sucursal y grupo. Sin periodo, el backend usa el mes de la última venta registrada.
 // `excluir`: ids de excepciones a dejar fuera ([] = facturación bruta); sin indicarlo, las de la hoja ANAL.
@@ -89,6 +126,7 @@ export async function cargarArchivoInicial(tipoReporte, archivo, sucursal) {
   const respuesta = await fetch(`${API_URL}/api/carga_inicial`, {
     method: 'POST',
     body: formData,
+    headers: cabecerasUsuario(), // para registrar quién importó el archivo
   });
 
   try {
