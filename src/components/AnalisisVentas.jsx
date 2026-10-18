@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Bar, BarChart, Cell, LabelList, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from 'recharts';
-import { ArrowLeft, BarChart3, Store, XCircle, RefreshCw } from 'lucide-react';
-import { obtenerAnalisisVentas } from '../services/api.js';
+import { ArrowLeft, BarChart3, Store, XCircle, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { guardarExcepciones, obtenerAnalisisVentas } from '../services/api.js';
+import AdministrarExcepciones from './AdministrarExcepciones.jsx';
 import { capitalizar, fechaLocal, nombreMes, usd, usdCompacto } from '../utils/formato.js';
 
 // Colores en orden fijo para los grupos principales del mes (validados para daltonismo en los pares
@@ -36,84 +37,6 @@ function Tarjeta({ titulo, subtitulo, children }) {
       <h2 className="font-semibold text-slate-900">{titulo}</h2>
       {subtitulo && <p className="text-xs text-slate-500">{subtitulo}</p>}
       <div className="mt-4">{children}</div>
-    </section>
-  );
-}
-
-// Ventas que no son facturación comercial (hoja ANAL). Marcadas = se excluyen del total.
-function PanelExcepciones({ datos, cargando, onCambiar }) {
-  const excluidas = datos.excepciones.filter((e) => e.excluida).map((e) => e.id);
-  const montoExcluido = datos.total_bruto - datos.total_mes;
-  const alternar = (id) => onCambiar(excluidas.includes(id) ? excluidas.filter((x) => x !== id) : [...excluidas, id]);
-
-  return (
-    <section className="rounded-xl bg-white p-4 sm:p-5 ring-1 ring-slate-200">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="font-semibold text-slate-900">Excepciones</h2>
-          <p className="text-xs text-slate-500">Marca las ventas que no deben contar como facturación del mes</p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => onCambiar(null)}
-            disabled={cargando}
-            className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-50"
-          >
-            Como en ANAL
-          </button>
-          <button
-            onClick={() => onCambiar([])}
-            disabled={cargando}
-            className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-50"
-          >
-            Facturación bruta
-          </button>
-        </div>
-      </div>
-
-      <dl className="mt-3 grid grid-cols-3 gap-2 rounded-lg bg-slate-50 p-3 text-center">
-        <div>
-          <dt className="text-[11px] text-slate-500">Bruto</dt>
-          <dd className="font-semibold text-slate-900">{usd(datos.total_bruto, 0)}</dd>
-        </div>
-        <div>
-          <dt className="text-[11px] text-slate-500">Excluido</dt>
-          <dd className="font-semibold text-slate-500">− {usd(montoExcluido, 0)}</dd>
-        </div>
-        <div>
-          <dt className="text-[11px] text-slate-500">Facturación del mes</dt>
-          <dd className="font-semibold text-slate-900">{usd(datos.total_mes, 0)}</dd>
-        </div>
-      </dl>
-
-      <fieldset disabled={cargando} className="mt-3 grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">
-        {datos.excepciones.map((e) => (
-          <label key={e.id} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-slate-50">
-            <input
-              type="checkbox"
-              checked={e.excluida}
-              onChange={() => alternar(e.id)}
-              className="h-4 w-4 rounded border-slate-300 accent-slate-900"
-            />
-            <span className="flex-1 text-slate-700">
-              {e.nombre}
-              {e.categoria === 'servicio' && (
-                <span className="ml-1.5 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-slate-500">
-                  servicio
-                </span>
-              )}
-            </span>
-            <span className={`tabular-nums text-xs ${e.monto ? 'text-slate-600' : 'text-slate-300'}`}>{usd(e.monto, 0)}</span>
-          </label>
-        ))}
-      </fieldset>
-
-      {datos.dias_sin_tasa_interna > 0 && (
-        <p className="mt-3 rounded-lg bg-amber-50 p-2.5 text-xs text-amber-800 ring-1 ring-amber-200">
-          {datos.dias_sin_tasa_interna} {datos.dias_sin_tasa_interna === 1 ? 'día' : 'días'} de este mes sin tasa interna
-          cargada: sus ventas se convirtieron con la tasa BCV del sistema. Carga la hoja TASA en Configuración inicial.
-        </p>
-      )}
     </section>
   );
 }
@@ -165,7 +88,8 @@ function ComparativoSucursales({ sucursales, seleccion, onSeleccionar, totalMes 
 export default function AnalisisVentas({ onVolver }) {
   const [datos, setDatos] = useState(null);
   const [periodo, setPeriodo] = useState(null); // null = mes de la última venta registrada
-  const [excluir, setExcluir] = useState(null); // null = excepciones de la hoja ANAL
+  const [menuExcepciones, setMenuExcepciones] = useState(false);
+  const [guardando, setGuardando] = useState(false);
   const [seleccion, setSeleccion] = useState(null);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
@@ -174,7 +98,7 @@ export default function AnalisisVentas({ onVolver }) {
     setCargando(true);
     setError(null);
     try {
-      const d = await obtenerAnalisisVentas(periodo, excluir);
+      const d = await obtenerAnalisisVentas(periodo);
       setDatos(d);
       setSeleccion((actual) => (d.sucursales.some((s) => s.sucursal === actual) ? actual : d.sucursales[0]?.sucursal ?? null));
     } catch (e) {
@@ -186,7 +110,21 @@ export default function AnalisisVentas({ onVolver }) {
     } finally {
       setCargando(false);
     }
-  }, [periodo, excluir]);
+  }, [periodo]);
+
+  // Guarda la selección en el backend (null = restablecer) y recalcula con ella.
+  const cambiarExcepciones = async (excluir) => {
+    setGuardando(true);
+    try {
+      await guardarExcepciones(excluir);
+      await cargar();
+    } catch (e) {
+      setError(e instanceof TypeError ? 'No se pudo conectar con el servidor.' : e.message);
+      setMenuExcepciones(false);
+    } finally {
+      setGuardando(false);
+    }
+  };
 
   useEffect(() => {
     cargar();
@@ -222,7 +160,7 @@ export default function AnalisisVentas({ onVolver }) {
             </div>
           </div>
           {datos && (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <label htmlFor="periodo" className="text-sm text-slate-500">
                 Mes
               </label>
@@ -242,11 +180,31 @@ export default function AnalisisVentas({ onVolver }) {
                   </option>
                 ))}
               </select>
+              <button
+                onClick={() => setMenuExcepciones(true)}
+                title="Administrar excepciones"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-sm font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-100"
+              >
+                <SlidersHorizontal className="h-4 w-4" />
+                <span className="hidden sm:inline">Excepciones</span>
+                <span className="rounded-full bg-slate-100 px-1.5 text-xs text-slate-500">
+                  {datos.excepciones.filter((e) => e.excluida).length}
+                </span>
+              </button>
               {cargando && <RefreshCw className="h-4 w-4 animate-spin text-slate-400" />}
             </div>
           )}
         </div>
       </div>
+
+      {menuExcepciones && datos && (
+        <AdministrarExcepciones
+          datos={{ ...datos, mesNombre: nombreMes(datos.mes, datos.ano) }}
+          guardando={guardando}
+          onCambiar={cambiarExcepciones}
+          onCerrar={() => setMenuExcepciones(false)}
+        />
+      )}
 
       {error && (
         <div role="alert" className="flex items-start gap-3 rounded-xl bg-red-50 p-4 text-red-800 ring-1 ring-red-200">
@@ -268,7 +226,13 @@ export default function AnalisisVentas({ onVolver }) {
       {datos && !error && (
         // Al recargar se conserva el render anterior atenuado, sin saltos de layout.
         <div className={`space-y-6 transition-opacity ${cargando ? 'opacity-50' : ''}`}>
-          <PanelExcepciones datos={datos} cargando={cargando} onCambiar={setExcluir} />
+          {datos.dias_sin_tasa_interna > 0 && (
+            <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800 ring-1 ring-amber-200">
+              {datos.dias_sin_tasa_interna} {datos.dias_sin_tasa_interna === 1 ? 'día' : 'días'} de este mes sin tasa
+              interna cargada: sus ventas se convirtieron con la tasa BCV del sistema. Carga la hoja TASA en
+              Configuración inicial.
+            </p>
+          )}
 
           {datos.sucursales.length > 1 && (
             <div role="tablist" aria-label="Sucursal" className="flex gap-2 overflow-x-auto pb-1">

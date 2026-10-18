@@ -58,6 +58,18 @@ export async function obtenerAnalisisVentas(periodo, excluir) {
   return data;
 }
 
+// Guarda qué excepciones se excluyen de la facturación (null = volver a las de la hoja ANAL).
+export async function guardarExcepciones(excluir) {
+  const respuesta = await fetch(`${API_URL}/api/excepciones`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(excluir ? { excluir } : { restablecer: true }),
+  });
+  const data = await respuesta.json();
+  if (!data.success) throw new Error(data.error || 'No se pudieron guardar las excepciones.');
+  return data;
+}
+
 // Tasas BCV e interna vigentes en `fecha` (ISO, por defecto hoy) y su historial.
 export async function obtenerTasas(fecha, dias = 15) {
   const params = new URLSearchParams({ dias });

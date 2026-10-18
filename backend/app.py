@@ -50,6 +50,12 @@ class TasaInterna(db.Model):
     tasa_paralelo = db.Column(db.Numeric(12, 4))  # tasa interna del día (hoja TASA / sistema)
     tasa_bcv = db.Column(db.Numeric(12, 4))  # tasa BCV del día (FACTOR del reporte de ventas)
 
+class ConfigExcepcion(db.Model):
+    """Excepciones elegidas en "Administrar excepciones"; sin fila, rige el valor por defecto de EXCEPCIONES."""
+    __tablename__ = 'config_excepciones'
+    id = db.Column(db.String(50), primary_key=True)
+    excluida = db.Column(db.Boolean, nullable=False)
+
 class Venta(db.Model):
     __tablename__ = 'ventas'
     id = db.Column(db.Integer, primary_key=True)
@@ -594,16 +600,41 @@ def logistica():
 GRUPOS_PRINCIPALES = 5  # el resto se agrupa en "OTROS" para que el desglose sea legible
 
 
+def excepciones_configuradas():
+    """Ids excluidos según "Administrar excepciones" (por defecto, los de la hoja ANAL)."""
+    guardadas = {c.id: c.excluida for c in ConfigExcepcion.query}
+    return [e['id'] for e in EXCEPCIONES if guardadas.get(e['id'], e.get('por_defecto', True))]
+
+
 def excepciones_a_excluir():
-    """?excluir=id1,id2 (vacío = facturación bruta). Sin el parámetro, las excepciones de la hoja ANAL."""
+    """?excluir=id1,id2 (vacío = facturación bruta) para una consulta puntual; sin el parámetro, la configuración guardada."""
     if 'excluir' not in request.args:
-        return list(EXCEPCIONES_POR_DEFECTO)
+        return excepciones_configuradas()
     validas = {e['id'] for e in EXCEPCIONES}
     return [x for x in request.args['excluir'].split(',') if x in validas]
 
 
 def filtro_excepciones(excluir):
     return or_(Venta.excepcion.is_(None), Venta.excepcion.notin_(excluir)) if excluir else true()
+
+
+@app.route('/api/excepciones', methods=['PUT'])
+def guardar_excepciones():
+    """{"excluir": [ids]} guarda qué excepciones se excluyen; {"restablecer": true} vuelve a las de la hoja ANAL."""
+    datos = request.get_json(silent=True) or {}
+    validas = {e['id'] for e in EXCEPCIONES}
+    if datos.get('restablecer'):
+        ConfigExcepcion.query.delete()
+    else:
+        excluir = datos.get('excluir')
+        if not isinstance(excluir, list) or not set(excluir) <= validas:
+            return jsonify(success=False, error="'excluir' debe ser una lista de ids de excepción válidos."), 400
+        for id_ in validas:
+            config = db.session.get(ConfigExcepcion, id_) or ConfigExcepcion(id=id_)
+            config.excluida = id_ in excluir
+            db.session.add(config)
+    db.session.commit()
+    return jsonify(success=True, excluidas=excepciones_configuradas())
 
 
 @app.route('/api/ventas/analisis', methods=['GET'])
