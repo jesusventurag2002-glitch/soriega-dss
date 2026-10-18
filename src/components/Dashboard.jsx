@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Sparkles, Clock, CheckCircle2, Flame, RefreshCw, XCircle } from 'lucide-react';
 import TransferList from './TransferList.jsx';
+import WidgetVentas from './WidgetVentas.jsx';
 import { obtenerTrasladosSugeridos } from '../services/api.js';
 
 const FILTROS = [
@@ -26,7 +27,7 @@ function Kpi({ icono: Icono, etiqueta, valor, acento }) {
   );
 }
 
-export default function Dashboard({ usuario }) {
+export default function Dashboard({ usuario, onVerVentas }) {
   const [traslados, setTraslados] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
@@ -93,6 +94,8 @@ export default function Dashboard({ usuario }) {
           </button>
         </div>
       </div>
+
+      <WidgetVentas onVerDesglose={onVerVentas} />
 
       {error ? (
         <div role="alert" className="flex items-start gap-3 rounded-xl bg-red-50 p-4 text-red-800 ring-1 ring-red-200">

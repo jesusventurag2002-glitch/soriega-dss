@@ -4,6 +4,7 @@ import Layout from './components/Layout.jsx';
 import Dashboard from './components/Dashboard.jsx';
 import ConfiguracionInicial from './components/ConfiguracionInicial.jsx';
 import PanelCapitalEstancado from './components/PanelCapitalEstancado.jsx';
+import AnalisisVentas from './components/AnalisisVentas.jsx';
 import { USUARIOS } from './data/mockData.js';
 
 export default function App() {
@@ -24,7 +25,8 @@ export default function App() {
         setVista('dashboard');
       }}
     >
-      {vista === 'dashboard' && <Dashboard usuario={usuario} />}
+      {vista === 'dashboard' && <Dashboard usuario={usuario} onVerVentas={() => setVista('ventas')} />}
+      {vista === 'ventas' && <AnalisisVentas onVolver={() => setVista('dashboard')} />}
       {vista === 'estancado' && <PanelCapitalEstancado />}
       {vista === 'configuracion' && <ConfiguracionInicial />}
     </Layout>

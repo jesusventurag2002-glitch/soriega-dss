@@ -3,6 +3,7 @@ import {
   AlertOctagon, DollarSign, PackageX, Hourglass, Tag, Warehouse, Truck, TrendingDown, RefreshCw, XCircle,
 } from 'lucide-react';
 import { obtenerCapitalEstancado } from '../services/api.js';
+import { usd } from '../utils/formato.js';
 
 const UMBRALES = [60, 90, 180];
 
@@ -12,7 +13,6 @@ const ACCIONES = [
   { id: 'devolucion', texto: 'Devolución a proveedor', corto: 'A proveedor', icono: Truck, estilo: 'text-red-700 ring-red-200 hover:bg-red-50' },
 ];
 
-const usd = (n) => `$${n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fecha = (iso) => iso.split('-').reverse().join('/');
 
 // El historial cubre menos de un año, así que "crítico" = sin ninguna venta registrada.

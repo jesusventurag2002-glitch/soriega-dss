@@ -1,8 +1,9 @@
-import { Boxes, LogOut, LayoutDashboard, Database, AlertOctagon } from 'lucide-react';
+import { Boxes, LogOut, LayoutDashboard, Database, AlertOctagon, BarChart3 } from 'lucide-react';
 import AlertBell from './AlertBell.jsx';
 
 const VISTAS = [
   { id: 'dashboard', texto: 'Traslados', icono: LayoutDashboard },
+  { id: 'ventas', texto: 'Ventas', icono: BarChart3 },
   { id: 'estancado', texto: 'Capital estancado', icono: AlertOctagon },
   { id: 'configuracion', texto: 'Configuración inicial', icono: Database },
 ];
