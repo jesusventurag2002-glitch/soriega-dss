@@ -3,6 +3,7 @@ import Login from './components/Login.jsx';
 import Layout from './components/Layout.jsx';
 import Dashboard from './components/Dashboard.jsx';
 import ConfiguracionInicial from './components/ConfiguracionInicial.jsx';
+import PanelCapitalEstancado from './components/PanelCapitalEstancado.jsx';
 import { USUARIOS } from './data/mockData.js';
 
 export default function App() {
@@ -23,7 +24,9 @@ export default function App() {
         setVista('dashboard');
       }}
     >
-      {vista === 'dashboard' ? <Dashboard usuario={usuario} /> : <ConfiguracionInicial />}
+      {vista === 'dashboard' && <Dashboard usuario={usuario} />}
+      {vista === 'estancado' && <PanelCapitalEstancado />}
+      {vista === 'configuracion' && <ConfiguracionInicial />}
     </Layout>
   );
 }
