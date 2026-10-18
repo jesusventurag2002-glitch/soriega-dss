@@ -76,6 +76,10 @@ CLIENTES_EXCLUIDOS = [
     "MERCANCIA EXTRAVIADA",
 ]
 
+# Artículos de uso interno (no comerciales): se ignoran en toda la lógica de negocio.
+GRUPOS_EXCLUIDOS = ["MARKETING"]
+SUBGRUPOS_EXCLUIDOS = ["EQUIPOS DE OFICINA"]
+
 # Al menos una columna de cada grupo debe existir en el archivo.
 COLUMNAS_REQUERIDAS = {
     'ventas': [('codigo', 'cdg'), ('emision',)],
@@ -129,6 +133,12 @@ def normalizar_columnas(columnas):
     return pd.Index(columnas).astype(str).str.strip().str.lower()
 
 
+def es_articulo_excluido(row):
+    grupo = texto(row.get('nombredegr', row.get('nombredegrupo'))).upper()
+    subgrupo = texto(row.get('nombre_sub')).upper()
+    return grupo in GRUPOS_EXCLUIDOS or subgrupo in SUBGRUPOS_EXCLUIDOS
+
+
 def leer_archivo(archivo, tipo_reporte):
     nombre = archivo.filename.lower()
     contenido = io.BytesIO(archivo.read())
@@ -177,11 +187,15 @@ def cargar_ventas(df):
 
     tiene_fact = 'fact' in df.columns
     tiene_costo = 'costo' in df.columns
-    ventas, excluidas, sin_fecha = [], 0, 0
+    ventas, excluidas, internas, sin_fecha = [], 0, 0, 0
 
     for row in df.to_dict('records'):
         codigo_art = codigo_articulo(row.get('codigo', row.get('cdg')))
         if not codigo_art or codigo_art == 'nan':
+            continue
+
+        if es_articulo_excluido(row):
+            internas += 1
             continue
 
         cliente_nombre = texto(row.get('nombrecli')).upper()
@@ -230,6 +244,8 @@ def cargar_ventas(df):
     mensaje = f"Historial de ventas cargado: {len(ventas)} registros."
     if excluidas:
         mensaje += f" {excluidas} excluidos por cliente especial."
+    if internas:
+        mensaje += f" {internas} ignorados por ser de uso interno (Marketing / Equipos de oficina)."
     if sin_fecha:
         mensaje += f" {sin_fecha} omitidos por fecha inválida."
     return mensaje
@@ -240,10 +256,16 @@ def cargar_inventario(df, origen):
     articulos = {a.codigo: a for a in Articulo.query.all()}
     inventarios = {i.articulo_codigo: i for i in Inventario.query.filter_by(origen_inventario=origen)}
     nuevos, actualizados = 0, 0
+    # Incluye los de uso interno ya guardados por cargas anteriores, para limpiarlos.
+    codigos_internos = {c for c, a in articulos.items() if (a.nombredegrupo or '').upper() in GRUPOS_EXCLUIDOS}
 
     for row in df.to_dict('records'):
         codigo_art = codigo_articulo(row.get('codigo', row.get('cdg', row.get('codigoart'))))
         if not codigo_art or codigo_art == 'nan':
+            continue
+
+        if es_articulo_excluido(row):
+            codigos_internos.add(codigo_art)
             continue
 
         existencia_actual = int(numero(row.get('existencia')))
@@ -275,9 +297,16 @@ def cargar_inventario(df, origen):
             db.session.add(inv)
             inventarios[codigo_art] = inv
 
+    if codigos_internos:
+        Inventario.query.filter(Inventario.articulo_codigo.in_(codigos_internos)).delete(synchronize_session=False)
+        Articulo.query.filter(Articulo.codigo.in_(codigos_internos)).delete(synchronize_session=False)
+
     db.session.commit()
-    return (f"Inventario {origen} guardado: {nuevos + actualizados} artículos "
-            f"({nuevos} nuevos, {actualizados} actualizados).")
+    mensaje = (f"Inventario {origen} guardado: {nuevos + actualizados} artículos "
+               f"({nuevos} nuevos, {actualizados} actualizados).")
+    if codigos_internos:
+        mensaje += f" {len(codigos_internos)} ignorados por ser de uso interno (Marketing / Equipos de oficina)."
+    return mensaje
 
 
 # ==================== API ====================
