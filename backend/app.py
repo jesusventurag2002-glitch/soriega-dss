@@ -340,6 +340,21 @@ def resumen():
     )
 
 
+def clasificacion_abc():
+    """Clasifica por rotación (unidades netas vendidas): A = primer 80% acumulado, B = siguiente 15%, C = resto."""
+    unidades = db.session.query(
+        Venta.articulo_codigo, func.sum(Venta.cantidad_neta)
+    ).group_by(Venta.articulo_codigo).order_by(func.sum(Venta.cantidad_neta).desc()).all()
+
+    total = sum(max(int(u or 0), 0) for _, u in unidades)
+    abc, acumulado = {}, 0
+    for codigo, u in unidades:
+        participacion_previa = acumulado / total if total else 1
+        abc[codigo] = 'A' if participacion_previa < 0.80 else 'B' if participacion_previa < 0.95 else 'C'
+        acumulado += max(int(u or 0), 0)
+    return abc
+
+
 @app.route('/api/logistica', methods=['POST'])
 def logistica():
     datos = request.get_json(silent=True) or {}
@@ -365,6 +380,7 @@ def logistica():
         ).group_by(Venta.articulo_codigo)
     }
 
+    abc = clasificacion_abc()
     resultados = []
     for art in Articulo.query.all():
         stock_inv = stock.get((art.codigo, 'INV'), 0)
@@ -382,6 +398,7 @@ def logistica():
                     resultados.append({
                         'codigo': art.codigo, 'nombre': art.nombre, 'grupo': art.nombredegrupo,
                         'origen': 'INVAL', 'destino': 'INV', 'cantidad': cant_a_mover, 'disponible_almacen': stock_inval,
+                        'stock_sucursal': stock_inv, 'clasificacion_abc': abc.get(art.codigo, 'C'),
                     })
         else:
             stock_total = stock_inv + stock_inval
@@ -392,6 +409,7 @@ def logistica():
                         'codigo': art.codigo, 'nombre': art.nombre, 'grupo': art.nombredegrupo,
                         'proveedor': art.proveedor, 'cantidad_pedir': cant_a_pedir,
                         'deficit': round(demanda_proyectada - stock_total),
+                        'clasificacion_abc': abc.get(art.codigo, 'C'),
                     })
 
     return jsonify(success=True, tipo_analisis=tipo_analisis, dias=dias, resultados=resultados)

@@ -1,85 +1,9 @@
-// Datos simulados. Cuando exista el backend (Python + PostgreSQL), estos
-// arreglos se reemplazan por llamadas a la API con la misma forma.
+// Datos simulados que aún no provienen del backend (login y alertas de auditoría).
 
 export const USUARIOS = {
   analista: { nombre: 'María González', rol: 'analista', etiqueta: 'Analista de Inventario' },
   gerente: { nombre: 'Carlos Ramírez', rol: 'gerente', etiqueta: 'Gerente de Logística' },
 };
-
-export const TRASLADOS_SUGERIDOS = [
-  {
-    id: 'TR-1042',
-    codigo: '7501055303786',
-    descripcion: 'Aceite Vegetal Comestible 1L',
-    clasificacion_abc: 'A',
-    origen: 'Almacén Principal',
-    destino: 'Sucursal Centro',
-    stock_origen: 1240,
-    stock_destino: 18,
-    cantidad_sugerida: 240,
-    estado: 'pendiente',
-  },
-  {
-    id: 'TR-1043',
-    codigo: '7501000111206',
-    descripcion: 'Arroz Blanco Grano Largo 1kg',
-    clasificacion_abc: 'A',
-    origen: 'Almacén Principal',
-    destino: 'Sucursal Norte',
-    stock_origen: 860,
-    stock_destino: 32,
-    cantidad_sugerida: 180,
-    estado: 'pendiente',
-  },
-  {
-    id: 'TR-1044',
-    codigo: '7702004003508',
-    descripcion: 'Detergente en Polvo 2kg',
-    clasificacion_abc: 'B',
-    origen: 'Almacén Principal',
-    destino: 'Sucursal Centro',
-    stock_origen: 410,
-    stock_destino: 45,
-    cantidad_sugerida: 60,
-    estado: 'aprobado',
-  },
-  {
-    id: 'TR-1045',
-    codigo: '7501008042956',
-    descripcion: 'Café Molido Tostado 500g',
-    clasificacion_abc: 'B',
-    origen: 'Sucursal Sur',
-    destino: 'Sucursal Norte',
-    stock_origen: 95,
-    stock_destino: 6,
-    cantidad_sugerida: 36,
-    estado: 'pendiente',
-  },
-  {
-    id: 'TR-1046',
-    codigo: '7891024134702',
-    descripcion: 'Papel Aluminio Rollo 25m',
-    clasificacion_abc: 'C',
-    origen: 'Almacén Principal',
-    destino: 'Sucursal Sur',
-    stock_origen: 150,
-    stock_destino: 22,
-    cantidad_sugerida: 12,
-    estado: 'rechazado',
-  },
-  {
-    id: 'TR-1047',
-    codigo: '7501035911208',
-    descripcion: 'Leche Entera UHT 1L (Caja x12)',
-    clasificacion_abc: 'A',
-    origen: 'Almacén Principal',
-    destino: 'Sucursal Sur',
-    stock_origen: 520,
-    stock_destino: 9,
-    cantidad_sugerida: 96,
-    estado: 'pendiente',
-  },
-];
 
 export const ALERTAS = [
   {

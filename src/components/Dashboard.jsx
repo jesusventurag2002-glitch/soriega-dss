@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
-import { Sparkles, Clock, CheckCircle2, Flame } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Sparkles, Clock, CheckCircle2, Flame, RefreshCw, XCircle } from 'lucide-react';
 import TransferList from './TransferList.jsx';
-import { TRASLADOS_SUGERIDOS } from '../data/mockData.js';
+import { obtenerTrasladosSugeridos } from '../services/api.js';
 
 const FILTROS = [
   { id: 'todos', texto: 'Todos' },
@@ -9,6 +9,8 @@ const FILTROS = [
   { id: 'aprobado', texto: 'Aprobados' },
   { id: 'rechazado', texto: 'Rechazados' },
 ];
+
+const HORIZONTES = [7, 15, 30];
 
 function Kpi({ icono: Icono, etiqueta, valor, acento }) {
   return (
@@ -27,16 +29,29 @@ function Kpi({ icono: Icono, etiqueta, valor, acento }) {
 export default function Dashboard({ usuario }) {
   const [traslados, setTraslados] = useState([]);
   const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState(null);
   const [filtro, setFiltro] = useState('todos');
+  const [dias, setDias] = useState(15);
 
-  // Simula la llamada al backend. Reemplazar por fetch('/api/traslados/sugeridos').
-  useEffect(() => {
-    const t = setTimeout(() => {
-      setTraslados(TRASLADOS_SUGERIDOS);
+  const cargar = useCallback(async () => {
+    setCargando(true);
+    setError(null);
+    try {
+      setTraslados(await obtenerTrasladosSugeridos(dias));
+    } catch (e) {
+      setError(
+        e instanceof TypeError
+          ? 'No se pudo conectar con el servidor. Verifica que el backend esté activo en el puerto 5000.'
+          : e.message
+      );
+    } finally {
       setCargando(false);
-    }, 700);
-    return () => clearTimeout(t);
-  }, []);
+    }
+  }, [dias]);
+
+  useEffect(() => {
+    cargar();
+  }, [cargar]);
 
   const actualizar = (id, cambios) =>
     setTraslados((prev) => prev.map((t) => (t.id === id ? { ...t, ...cambios } : t)));
@@ -46,29 +61,71 @@ export default function Dashboard({ usuario }) {
 
   return (
     <div className="space-y-6">
-      <div>
-        <p className="text-sm text-slate-500">Hola, {usuario.nombre.split(' ')[0]} 👋</p>
-        <h1 className="text-2xl font-semibold text-slate-900">Bitácora de traslados</h1>
-      </div>
-
-      <div className="flex items-start gap-3 rounded-xl bg-slate-900 text-white p-4 sm:p-5">
-        <Sparkles className="h-5 w-5 shrink-0 text-amber-300 mt-0.5" />
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="font-medium">El sistema generó {traslados.length} borradores de traslado</p>
-          <p className="text-sm text-slate-300">
-            Basados en stock actual, punto de reorden y rotación ABC.{' '}
-            {usuario.rol === 'gerente'
-              ? 'Revisa y aprueba los pendientes.'
-              : 'Ajusta las cantidades antes de enviarlos a aprobación.'}
-          </p>
+          <p className="text-sm text-slate-500">Hola, {usuario.nombre.split(' ')[0]} 👋</p>
+          <h1 className="text-2xl font-semibold text-slate-900">Bitácora de traslados</h1>
+        </div>
+        <div className="flex items-center gap-2">
+          <label htmlFor="horizonte" className="text-sm text-slate-500">
+            Cubrir demanda de
+          </label>
+          <select
+            id="horizonte"
+            value={dias}
+            onChange={(e) => setDias(Number(e.target.value))}
+            disabled={cargando}
+            className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+          >
+            {HORIZONTES.map((d) => (
+              <option key={d} value={d}>
+                {d} días
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={cargar}
+            disabled={cargando}
+            title="Recalcular"
+            className="p-2 rounded-lg text-slate-500 ring-1 ring-slate-200 bg-white hover:bg-slate-100 hover:text-slate-900 transition disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${cargando ? 'animate-spin' : ''}`} />
+          </button>
         </div>
       </div>
+
+      {error ? (
+        <div role="alert" className="flex items-start gap-3 rounded-xl bg-red-50 p-4 text-red-800 ring-1 ring-red-200">
+          <XCircle className="h-5 w-5 shrink-0 mt-0.5" />
+          <p className="flex-1 text-sm">{error}</p>
+          <button onClick={cargar} className="text-sm font-medium underline underline-offset-2">
+            Reintentar
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-start gap-3 rounded-xl bg-slate-900 text-white p-4 sm:p-5">
+          <Sparkles className="h-5 w-5 shrink-0 text-amber-300 mt-0.5" />
+          <div>
+            <p className="font-medium">
+              {cargando
+                ? 'Analizando ventas e inventario...'
+                : `El sistema generó ${traslados.length} borradores de traslado`}
+            </p>
+            <p className="text-sm text-slate-300">
+              Del Almacén Principal a la sucursal, para cubrir {dias} días de demanda según el ritmo de ventas.{' '}
+              {usuario.rol === 'gerente'
+                ? 'Revisa y aprueba los pendientes.'
+                : 'Ajusta las cantidades antes de enviarlos a aprobación.'}
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <Kpi icono={Clock} etiqueta="Pendientes de aprobación" valor={pendientes.length} acento="bg-amber-50 text-amber-600" />
         <Kpi
           icono={CheckCircle2}
-          etiqueta="Aprobados hoy"
+          etiqueta="Aprobados en esta sesión"
           valor={traslados.filter((t) => t.estado === 'aprobado').length}
           acento="bg-emerald-50 text-emerald-600"
         />
@@ -97,7 +154,7 @@ export default function Dashboard({ usuario }) {
           ))}
         </div>
 
-        <TransferList traslados={visibles} cargando={cargando} rol={usuario.rol} onActualizar={actualizar} />
+        {!error && <TransferList traslados={visibles} cargando={cargando} rol={usuario.rol} onActualizar={actualizar} />}
       </section>
     </div>
   );
