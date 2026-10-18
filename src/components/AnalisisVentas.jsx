@@ -40,6 +40,84 @@ function Tarjeta({ titulo, subtitulo, children }) {
   );
 }
 
+// Ventas que no son facturación comercial (hoja ANAL). Marcadas = se excluyen del total.
+function PanelExcepciones({ datos, cargando, onCambiar }) {
+  const excluidas = datos.excepciones.filter((e) => e.excluida).map((e) => e.id);
+  const montoExcluido = datos.total_bruto - datos.total_mes;
+  const alternar = (id) => onCambiar(excluidas.includes(id) ? excluidas.filter((x) => x !== id) : [...excluidas, id]);
+
+  return (
+    <section className="rounded-xl bg-white p-4 sm:p-5 ring-1 ring-slate-200">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-slate-900">Excepciones</h2>
+          <p className="text-xs text-slate-500">Marca las ventas que no deben contar como facturación del mes</p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => onCambiar(null)}
+            disabled={cargando}
+            className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-50"
+          >
+            Como en ANAL
+          </button>
+          <button
+            onClick={() => onCambiar([])}
+            disabled={cargando}
+            className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-50"
+          >
+            Facturación bruta
+          </button>
+        </div>
+      </div>
+
+      <dl className="mt-3 grid grid-cols-3 gap-2 rounded-lg bg-slate-50 p-3 text-center">
+        <div>
+          <dt className="text-[11px] text-slate-500">Bruto</dt>
+          <dd className="font-semibold text-slate-900">{usd(datos.total_bruto, 0)}</dd>
+        </div>
+        <div>
+          <dt className="text-[11px] text-slate-500">Excluido</dt>
+          <dd className="font-semibold text-slate-500">− {usd(montoExcluido, 0)}</dd>
+        </div>
+        <div>
+          <dt className="text-[11px] text-slate-500">Facturación del mes</dt>
+          <dd className="font-semibold text-slate-900">{usd(datos.total_mes, 0)}</dd>
+        </div>
+      </dl>
+
+      <fieldset disabled={cargando} className="mt-3 grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">
+        {datos.excepciones.map((e) => (
+          <label key={e.id} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-slate-50">
+            <input
+              type="checkbox"
+              checked={e.excluida}
+              onChange={() => alternar(e.id)}
+              className="h-4 w-4 rounded border-slate-300 accent-slate-900"
+            />
+            <span className="flex-1 text-slate-700">
+              {e.nombre}
+              {e.categoria === 'servicio' && (
+                <span className="ml-1.5 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-slate-500">
+                  servicio
+                </span>
+              )}
+            </span>
+            <span className={`tabular-nums text-xs ${e.monto ? 'text-slate-600' : 'text-slate-300'}`}>{usd(e.monto, 0)}</span>
+          </label>
+        ))}
+      </fieldset>
+
+      {datos.dias_sin_tasa_interna > 0 && (
+        <p className="mt-3 rounded-lg bg-amber-50 p-2.5 text-xs text-amber-800 ring-1 ring-amber-200">
+          {datos.dias_sin_tasa_interna} {datos.dias_sin_tasa_interna === 1 ? 'día' : 'días'} de este mes sin tasa interna
+          cargada: sus ventas se convirtieron con la tasa BCV del sistema. Carga la hoja TASA en Configuración inicial.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function ComparativoSucursales({ sucursales, seleccion, onSeleccionar, totalMes }) {
   // Con una sola sucursal un gráfico de una barra no aporta: se muestra la cifra.
   if (sucursales.length === 1) {
@@ -87,6 +165,7 @@ function ComparativoSucursales({ sucursales, seleccion, onSeleccionar, totalMes 
 export default function AnalisisVentas({ onVolver }) {
   const [datos, setDatos] = useState(null);
   const [periodo, setPeriodo] = useState(null); // null = mes de la última venta registrada
+  const [excluir, setExcluir] = useState(null); // null = excepciones de la hoja ANAL
   const [seleccion, setSeleccion] = useState(null);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
@@ -95,7 +174,7 @@ export default function AnalisisVentas({ onVolver }) {
     setCargando(true);
     setError(null);
     try {
-      const d = await obtenerAnalisisVentas(periodo);
+      const d = await obtenerAnalisisVentas(periodo, excluir);
       setDatos(d);
       setSeleccion((actual) => (d.sucursales.some((s) => s.sucursal === actual) ? actual : d.sucursales[0]?.sucursal ?? null));
     } catch (e) {
@@ -107,7 +186,7 @@ export default function AnalisisVentas({ onVolver }) {
     } finally {
       setCargando(false);
     }
-  }, [periodo]);
+  }, [periodo, excluir]);
 
   useEffect(() => {
     cargar();
@@ -189,6 +268,8 @@ export default function AnalisisVentas({ onVolver }) {
       {datos && !error && (
         // Al recargar se conserva el render anterior atenuado, sin saltos de layout.
         <div className={`space-y-6 transition-opacity ${cargando ? 'opacity-50' : ''}`}>
+          <PanelExcepciones datos={datos} cargando={cargando} onCambiar={setExcluir} />
+
           {datos.sucursales.length > 1 && (
             <div role="tablist" aria-label="Sucursal" className="flex gap-2 overflow-x-auto pb-1">
               {datos.sucursales.map((s) => (

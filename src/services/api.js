@@ -43,11 +43,28 @@ export async function obtenerCapitalEstancado(diasMin, limite = 100) {
 }
 
 // Ventas de un mes por sucursal y grupo. Sin periodo, el backend usa el mes de la última venta registrada.
-export async function obtenerAnalisisVentas(periodo) {
-  const query = periodo ? `?mes=${periodo.mes}&ano=${periodo.ano}` : '';
+// `excluir`: ids de excepciones a dejar fuera ([] = facturación bruta); sin indicarlo, las de la hoja ANAL.
+export async function obtenerAnalisisVentas(periodo, excluir) {
+  const params = new URLSearchParams();
+  if (periodo) {
+    params.set('mes', periodo.mes);
+    params.set('ano', periodo.ano);
+  }
+  if (excluir) params.set('excluir', excluir.join(','));
+  const query = params.toString() ? `?${params}` : '';
   const respuesta = await fetch(`${API_URL}/api/ventas/analisis${query}`);
   const data = await respuesta.json();
   if (!data.success) throw new Error(data.error || 'No se pudo obtener el análisis de ventas.');
+  return data;
+}
+
+// Tasas BCV e interna vigentes en `fecha` (ISO, por defecto hoy) y su historial.
+export async function obtenerTasas(fecha, dias = 15) {
+  const params = new URLSearchParams({ dias });
+  if (fecha) params.set('fecha', fecha);
+  const respuesta = await fetch(`${API_URL}/api/tasas?${params}`);
+  const data = await respuesta.json();
+  if (!data.success) throw new Error(data.error || 'No se pudieron obtener las tasas.');
   return data;
 }
 

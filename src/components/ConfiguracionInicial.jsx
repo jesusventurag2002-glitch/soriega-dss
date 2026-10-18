@@ -8,6 +8,7 @@ const TIPOS_REPORTE = [
   { value: 'ventas', label: 'Historial de Ventas' },
   { value: 'inv_inval', label: 'Inventario Almacén Principal' },
   { value: 'inv_fisico', label: 'Inventario Sucursales' },
+  { value: 'tasas', label: 'Tasas internas (hoja TASA del libro de pedidos)' },
 ];
 
 function Alerta({ tipo, texto, onCerrar }) {

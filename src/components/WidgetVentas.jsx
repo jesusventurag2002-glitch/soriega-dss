@@ -37,7 +37,9 @@ export default function WidgetVentas({ onVerDesglose }) {
     <section className="rounded-xl bg-white p-4 sm:p-5 ring-1 ring-slate-200">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
         <div className="sm:w-64 shrink-0">
-          <p className="text-sm font-medium text-slate-600">Ventas del mes</p>
+          <p className="text-sm font-medium text-slate-600">
+            Ventas del mes <span className="font-normal text-slate-400">· sin excepciones</span>
+          </p>
           {error ? (
             <p className="mt-2 flex items-start gap-1.5 text-sm text-red-700">
               <XCircle className="h-4 w-4 shrink-0 mt-0.5" /> {error}

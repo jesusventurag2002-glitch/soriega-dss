@@ -1,5 +1,6 @@
 import { Boxes, LogOut, LayoutDashboard, Database, AlertOctagon, BarChart3 } from 'lucide-react';
 import AlertBell from './AlertBell.jsx';
+import TasasDelDia from './TasasDelDia.jsx';
 
 const VISTAS = [
   { id: 'dashboard', texto: 'Traslados', icono: LayoutDashboard },
@@ -29,6 +30,7 @@ export default function Layout({ usuario, vista, onCambiarVista, onLogout, child
           </div>
 
           <div className="flex items-center gap-2 sm:gap-4">
+            <TasasDelDia />
             <AlertBell />
 
             <div className="flex items-center gap-3 pl-2 sm:pl-4 border-l border-slate-200">

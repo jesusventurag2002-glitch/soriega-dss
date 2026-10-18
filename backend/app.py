@@ -8,7 +8,7 @@ import pandas as pd
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func, inspect, or_, text
+from sqlalchemy import and_, case, func, inspect, or_, text, true
 
 app = Flask(__name__)
 
@@ -47,7 +47,8 @@ class Inventario(db.Model):
 class TasaInterna(db.Model):
     __tablename__ = 'tasas_internas'
     fecha = db.Column(db.Date, primary_key=True)
-    tasa_paralelo = db.Column(db.Numeric(12, 4), nullable=False)
+    tasa_paralelo = db.Column(db.Numeric(12, 4))  # tasa interna del día (hoja TASA / sistema)
+    tasa_bcv = db.Column(db.Numeric(12, 4))  # tasa BCV del día (FACTOR del reporte de ventas)
 
 class Venta(db.Model):
     __tablename__ = 'ventas'
@@ -64,20 +65,30 @@ class Venta(db.Model):
     utilidad_real_usd = db.Column(db.Numeric(12, 4), default=0.0000)
     fecha_emision = db.Column(db.Date, nullable=False)
     sucursal = db.Column(db.String(100))  # indicada al cargar el reporte; el archivo no la trae
+    factura_bs = db.Column(db.Numeric(16, 4))  # PRECIOFIN * 1.16 * cantidad neta; el USD se calcula con la tasa interna
+    excepcion = db.Column(db.String(50))  # id de EXCEPCIONES si no es facturación comercial
 
 
 # ==================== UTILIDADES DE PARSEO ====================
-TIPOS_REPORTE = {'ventas', 'inv_fisico', 'inv_inval'}
+TIPOS_REPORTE = {'ventas', 'inv_fisico', 'inv_inval', 'tasas'}
 
-# EXCLUSIÓN DE CLIENTES ESPECIALES (reposiciones internas y mermas)
-CLIENTES_EXCLUIDOS = [
-    "REPOSICION MARGARITA",
-    "REPOSICION VALENCIA",
-    "PLASTINET VALENCIA",
-    "SAUL NORIEGA",
-    "MERCANCIA DANADA",
-    "MERCANCIA EXTRAVIADA",
+# Excepciones de la hoja ANAL: ventas que no son facturación comercial (reposiciones entre tiendas,
+# mermas, consumo interno y servicios). Se guardan marcadas y cada consulta decide si excluirlas.
+# Se comparan por igualdad exacta (como SUMIFS) contra el campo indicado del reporte.
+EXCEPCIONES = [
+    {'id': 'plastinet_valencia', 'nombre': 'Plastinet Valencia', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'PLASTINET VALENCIA'},
+    {'id': 'reposicion_maturin', 'nombre': 'Reposición Maturín', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'REPOSICION MATURIN'},
+    {'id': 'reposicion_margarita', 'nombre': 'Reposición Margarita', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'REPOSICION MARGARITA'},
+    {'id': 'saul_noriega', 'nombre': 'Saúl Noriega', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'SAUL NORIEGA'},
+    {'id': 'brotcars', 'nombre': 'Brotcars', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'BROTCARS'},
+    {'id': 'mercancia_danada', 'nombre': 'Mercancía dañada', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'MERCANCIA DANADA'},
+    {'id': 'productos_oficina', 'nombre': 'Productos para oficina', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'PRODUCTOS PARA OFICINA'},
+    {'id': 'servicio_brotcarservice', 'nombre': 'Brotcarservice', 'categoria': 'servicio', 'campo': 'nombredegr', 'valor': 'BROTCARSERVICE'},
+    {'id': 'servicio_balloonazo', 'nombre': 'Arreglos Balloonazo (mano de obra)', 'categoria': 'servicio', 'campo': 'nombre', 'valor': 'ARREGLOS BALLOONAZO MANO DE OBRA'},
+    # No figura en ANAL; el backend la excluía antes, por eso se ofrece desmarcada.
+    {'id': 'mercancia_extraviada', 'nombre': 'Mercancía extraviada', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'MERCANCIA EXTRAVIADA', 'por_defecto': False},
 ]
+EXCEPCIONES_POR_DEFECTO = [e['id'] for e in EXCEPCIONES if e.get('por_defecto', True)]
 
 # Artículos de uso interno (no comerciales): se ignoran en toda la lógica de negocio.
 GRUPOS_EXCLUIDOS = ["MARKETING"]
@@ -87,6 +98,7 @@ SUBGRUPOS_EXCLUIDOS = ["EQUIPOS DE OFICINA"]
 COLUMNAS_REQUERIDAS = {
     'ventas': [('codigo', 'cdg'), ('emision',)],
     'inventario': [('codigo', 'cdg', 'codigoart'), ('existencia',)],
+    'tasas': [('fecha',), ('tasa',)],
 }
 
 
@@ -142,6 +154,15 @@ def es_articulo_excluido(row):
     return grupo in GRUPOS_EXCLUIDOS or subgrupo in SUBGRUPOS_EXCLUIDOS
 
 
+def detectar_excepcion(row):
+    valores = {
+        'nombrecli': texto(row.get('nombrecli')).upper(),
+        'nombredegr': texto(row.get('nombredegr', row.get('nombredegrupo'))).upper(),
+        'nombre': texto(row.get('nombre')).upper(),
+    }
+    return next((e['id'] for e in EXCEPCIONES if valores[e['campo']] == e['valor']), None)
+
+
 def leer_archivo(archivo, tipo_reporte):
     nombre = archivo.filename.lower()
     contenido = io.BytesIO(archivo.read())
@@ -158,13 +179,18 @@ def leer_archivo(archivo, tipo_reporte):
         # El sistema administrativo exporta .XLS que en realidad son .xlsx;
         # pandas detecta el formato real por el contenido, no por la extensión.
         libro = pd.ExcelFile(contenido)
-        leer = libro.parse
+        # Las tasas pueden venir en el libro de pedidos completo: se usa su hoja TASA.
+        hoja = next((h for h in libro.sheet_names if h.strip().upper() == 'TASA'), 0) if tipo_reporte == 'tasas' else 0
+
+        def leer(**kwargs):
+            return libro.parse(sheet_name=hoja, **kwargs)
     else:
         raise ErrorCarga("Formato no soportado. Usa .xlsx, .xls o .csv.")
 
     # Los reportes traen un título antes de los encabezados ("Lista De Inventario...",
     # "Artículos Vendidos..."), así que se busca la fila que contiene las columnas requeridas.
-    requeridas = COLUMNAS_REQUERIDAS['ventas' if tipo_reporte == 'ventas' else 'inventario']
+    clave = tipo_reporte if tipo_reporte in COLUMNAS_REQUERIDAS else 'inventario'
+    requeridas = COLUMNAS_REQUERIDAS[clave]
     for header in range(MAX_FILAS_TITULO + 1):
         columnas = normalizar_columnas(leer(header=header, nrows=0).columns)
         if all(any(c in columnas for c in grupo) for grupo in requeridas):
@@ -191,7 +217,9 @@ def cargar_ventas(df, sucursal):
 
     tiene_fact = 'fact' in df.columns
     tiene_costo = 'costo' in df.columns
-    ventas, excluidas, internas, sin_fecha = [], 0, 0, 0
+    ventas, internas, sin_fecha = [], 0, 0
+    por_excepcion = {}
+    tasas_bcv = {}  # FACTOR del reporte = tasa BCV del día
 
     for row in df.to_dict('records'):
         codigo_art = codigo_articulo(row.get('codigo', row.get('cdg')))
@@ -202,10 +230,9 @@ def cargar_ventas(df, sucursal):
             internas += 1
             continue
 
-        cliente_nombre = texto(row.get('nombrecli')).upper()
-        if any(excluido in cliente_nombre for excluido in CLIENTES_EXCLUIDOS):
-            excluidas += 1
-            continue
+        excepcion = detectar_excepcion(row)
+        if excepcion:
+            por_excepcion[excepcion] = por_excepcion.get(excepcion, 0) + 1
 
         fecha_emision = parsear_fecha(row.get('emision'))
         if fecha_emision is None:
@@ -219,19 +246,25 @@ def cargar_ventas(df, sucursal):
         f_sistema = numero(row.get('factor'), 1.0)
         if f_sistema <= 0:
             f_sistema = 1.0
+        elif f_sistema > 1:
+            tasas_bcv.setdefault(fecha_emision, f_sistema)
         precio_local = numero(row.get('preciofin'))
         cantidad_neta = int(numero(row.get('cantidad'))) - int(numero(row.get('cntdevuelt')))
 
-        # Facturación real: columna 'fact' del Excel; si no viene, fórmula equivalente (IVA 16%).
+        # Facturación (hoja VENTA): PRECIOFIN * 1.16 * cantidad neta, en Bs. El USD se obtiene al consultar
+        # dividiendo entre la tasa interna del día; factura_real_usd (con FACTOR) queda como respaldo
+        # para fechas sin tasa interna. Si el archivo ya trae la columna 'fact', se usa tal cual.
         if tiene_fact:
+            factura_bs = None
             factura_real = numero(row.get('fact'))
         else:
-            factura_real = ((precio_local * 1.16) * cantidad_neta) / f_sistema
+            factura_bs = (precio_local * 1.16) * cantidad_neta
+            factura_real = factura_bs / f_sistema
 
         if tiene_costo:
             costo_real = numero(row.get('costo'))
         else:
-            costo_real = numero(row.get('costoex')) * cantidad_neta
+            costo_real = (numero(row.get('costoex')) * 1.16) * cantidad_neta
 
         ventas.append(Venta(
             documento=texto(row.get('documento'), 'S/D'), articulo_codigo=codigo_art,
@@ -240,19 +273,54 @@ def cargar_ventas(df, sucursal):
             factor_sistema=f_sistema, factura_real_usd=factura_real,
             costo_real_usd=costo_real, utilidad_real_usd=factura_real - costo_real,
             fecha_emision=fecha_emision, sucursal=sucursal,
+            factura_bs=factura_bs, excepcion=excepcion,
         ))
 
     db.session.add_all(ventas)
+    registrar_tasas(tasas_bcv, 'tasa_bcv')
     db.session.commit()
 
     mensaje = f"Historial de ventas de {sucursal} cargado: {len(ventas)} registros."
-    if excluidas:
-        mensaje += f" {excluidas} excluidos por cliente especial."
+    if por_excepcion:
+        nombres = {e['id']: e['nombre'] for e in EXCEPCIONES}
+        mensaje += (f" {sum(por_excepcion.values())} marcados como excepción y excluibles en el análisis ("
+                    + ', '.join(f"{nombres[k]}: {n}" for k, n in sorted(por_excepcion.items(), key=lambda x: -x[1])) + ").")
+    if tasas_bcv:
+        mensaje += f" Tasa BCV registrada para {len(tasas_bcv)} días."
     if internas:
         mensaje += f" {internas} ignorados por ser de uso interno (Marketing / Equipos de oficina)."
     if sin_fecha:
         mensaje += f" {sin_fecha} omitidos por fecha inválida."
     return mensaje
+
+
+def registrar_tasas(por_fecha, campo):
+    """Inserta o actualiza una de las tasas ('tasa_paralelo' o 'tasa_bcv') por fecha."""
+    if not por_fecha:
+        return
+    existentes = {t.fecha: t for t in TasaInterna.query.filter(TasaInterna.fecha.in_(list(por_fecha)))}
+    for fecha, valor in por_fecha.items():
+        tasa = existentes.get(fecha)
+        if tasa is None:
+            tasa = TasaInterna(fecha=fecha)
+            db.session.add(tasa)
+        setattr(tasa, campo, valor)
+
+
+def cargar_tasas(df):
+    """Tasas internas por fecha (hoja TASA del libro de pedidos: columnas FECHA y TASA)."""
+    tasas = {}
+    for row in df.to_dict('records'):
+        fecha, tasa = parsear_fecha(row.get('fecha')), numero(row.get('tasa'))
+        if fecha and tasa > 0:
+            tasas[fecha] = tasa
+    if not tasas:
+        raise ErrorCarga("No se encontraron filas con FECHA y TASA válidas.")
+    registrar_tasas(tasas, 'tasa_paralelo')
+    db.session.commit()
+    desde, hasta = min(tasas), max(tasas)
+    return (f"Tasas internas guardadas: {len(tasas)} días, del {desde:%d/%m/%Y} al {hasta:%d/%m/%Y}. "
+            f"Las ventas en USD se recalculan con estas tasas.")
 
 
 def cargar_inventario(df, origen, sucursal=None):
@@ -358,6 +426,8 @@ def carga_inicial():
             mensaje = cargar_ventas(df, sucursal)
         elif tipo_reporte == 'inv_fisico':
             mensaje = cargar_inventario(df, 'INV', sucursal)
+        elif tipo_reporte == 'tasas':
+            mensaje = cargar_tasas(df)
         else:
             mensaje = cargar_inventario(df, 'INVAL')
         return jsonify(success=True, message=mensaje), 200
@@ -378,16 +448,17 @@ def resumen():
     filtro = (
         func.extract('month', Venta.fecha_emision) == mes,
         func.extract('year', Venta.fecha_emision) == ano,
+        filtro_excepciones(excepciones_a_excluir()),
     )
 
-    total_factura, total_costo = db.session.query(
-        func.coalesce(func.sum(Venta.factura_real_usd), 0),
+    total_factura, total_costo = ventas_con_tasa(
+        func.coalesce(func.sum(VENTA_USD), 0),
         func.coalesce(func.sum(Venta.costo_real_usd), 0),
     ).filter(*filtro).one()
 
-    ventas_por_grupo = db.session.query(
-        Venta.grupo_venta, func.sum(Venta.factura_real_usd)
-    ).filter(*filtro).group_by(Venta.grupo_venta).order_by(func.sum(Venta.factura_real_usd).desc()).all()
+    ventas_por_grupo = ventas_con_tasa(
+        Venta.grupo_venta, func.sum(VENTA_USD)
+    ).filter(*filtro).group_by(Venta.grupo_venta).order_by(func.sum(VENTA_USD).desc()).all()
 
     return jsonify(
         success=True,
@@ -403,11 +474,27 @@ def resumen():
     )
 
 
+# La demanda (ABC, traslados, última venta) solo considera ventas comerciales: reposiciones entre tiendas,
+# mermas, consumo interno y servicios no son rotación de mercancía.
+ES_VENTA_COMERCIAL = Venta.excepcion.is_(None)
+
+# Facturación en USD como la hoja VENTA: Bs / tasa interna del día. Sin tasa interna para esa fecha
+# (o si el archivo traía 'fact'), se usa el valor guardado al cargar.
+VENTA_USD = case(
+    (and_(Venta.factura_bs.isnot(None), TasaInterna.tasa_paralelo > 0), Venta.factura_bs / TasaInterna.tasa_paralelo),
+    else_=Venta.factura_real_usd,
+)
+
+
+def ventas_con_tasa(*columnas):
+    return db.session.query(*columnas).select_from(Venta).outerjoin(TasaInterna, TasaInterna.fecha == Venta.fecha_emision)
+
+
 def clasificacion_abc():
     """Clasifica por rotación (unidades netas vendidas): A = primer 80% acumulado, B = siguiente 15%, C = resto."""
     unidades = db.session.query(
         Venta.articulo_codigo, func.sum(Venta.cantidad_neta)
-    ).group_by(Venta.articulo_codigo).order_by(func.sum(Venta.cantidad_neta).desc()).all()
+    ).filter(ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo).order_by(func.sum(Venta.cantidad_neta).desc()).all()
 
     total = sum(max(int(u or 0), 0) for _, u in unidades)
     abc, acumulado = {}, 0
@@ -450,14 +537,14 @@ def logistica():
         for codigo, sucursal, unidades, desde, hasta in db.session.query(
             Venta.articulo_codigo, Venta.sucursal, func.sum(Venta.cantidad_neta),
             func.min(Venta.fecha_emision), func.max(Venta.fecha_emision),
-        ).group_by(Venta.articulo_codigo, Venta.sucursal)
+        ).filter(ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo, Venta.sucursal)
     }
     vpd_total = {
         codigo: venta_diaria(unidades, desde, hasta)
         for codigo, unidades, desde, hasta in db.session.query(
             Venta.articulo_codigo, func.sum(Venta.cantidad_neta),
             func.min(Venta.fecha_emision), func.max(Venta.fecha_emision),
-        ).group_by(Venta.articulo_codigo)
+        ).filter(ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo)
     }
 
     abc = clasificacion_abc()
@@ -507,25 +594,47 @@ def logistica():
 GRUPOS_PRINCIPALES = 5  # el resto se agrupa en "OTROS" para que el desglose sea legible
 
 
+def excepciones_a_excluir():
+    """?excluir=id1,id2 (vacío = facturación bruta). Sin el parámetro, las excepciones de la hoja ANAL."""
+    if 'excluir' not in request.args:
+        return list(EXCEPCIONES_POR_DEFECTO)
+    validas = {e['id'] for e in EXCEPCIONES}
+    return [x for x in request.args['excluir'].split(',') if x in validas]
+
+
+def filtro_excepciones(excluir):
+    return or_(Venta.excepcion.is_(None), Venta.excepcion.notin_(excluir)) if excluir else true()
+
+
 @app.route('/api/ventas/analisis', methods=['GET'])
 def analisis_ventas():
-    """Ventas (facturación real USD) de un mes por sucursal y grupo, más la tendencia de los últimos 7 días."""
+    """Ventas (USD a tasa interna) de un mes por sucursal y grupo, más la tendencia de los últimos 7 días."""
     corte = db.session.query(func.max(Venta.fecha_emision)).scalar()
     if corte is None:
         return jsonify(success=False, error="No hay historial de ventas cargado."), 400
     # Por defecto, el mes de la última venta registrada (los datos son una foto fija).
     mes = request.args.get('mes', default=corte.month, type=int)
     ano = request.args.get('ano', default=corte.year, type=int)
+    excluir = excepciones_a_excluir()
+    sin_excluidas = filtro_excepciones(excluir)
 
     anio_col, mes_col = func.extract('year', Venta.fecha_emision), func.extract('month', Venta.fecha_emision)
     meses_disponibles = sorted(
         {(int(a), int(m)) for a, m in db.session.query(anio_col, mes_col).distinct()}, reverse=True
     )
+    del_mes = (anio_col == ano, mes_col == mes)
+
+    # Monto de cada excepción en el mes, para que se vea cuánto mueve marcarla o desmarcarla.
+    montos_excepcion = dict(ventas_con_tasa(Venta.excepcion, func.sum(VENTA_USD)).filter(
+        *del_mes, Venta.excepcion.isnot(None)).group_by(Venta.excepcion).all())
+    total_bruto = ventas_con_tasa(func.coalesce(func.sum(VENTA_USD), 0)).filter(*del_mes).scalar()
+    dias_sin_tasa = ventas_con_tasa(func.count(func.distinct(Venta.fecha_emision))).filter(
+        *del_mes, Venta.factura_bs.isnot(None), or_(TasaInterna.tasa_paralelo.is_(None), TasaInterna.tasa_paralelo <= 0)).scalar()
 
     sucursal_col = func.coalesce(Venta.sucursal, 'Sin asignar').label('sucursal')
-    filas = db.session.query(
-        sucursal_col, Venta.grupo_venta, func.sum(Venta.factura_real_usd)
-    ).filter(anio_col == ano, mes_col == mes).group_by(sucursal_col, Venta.grupo_venta).all()
+    filas = ventas_con_tasa(
+        sucursal_col, Venta.grupo_venta, func.sum(VENTA_USD)
+    ).filter(*del_mes, sin_excluidas).group_by(sucursal_col, Venta.grupo_venta).all()
 
     total_por_grupo = {}
     for _, grupo, total in filas:
@@ -552,9 +661,9 @@ def analisis_ventas():
     )
 
     desde = corte - timedelta(days=6)
-    diarios = dict(db.session.query(
-        Venta.fecha_emision, func.sum(Venta.factura_real_usd)
-    ).filter(Venta.fecha_emision >= desde).group_by(Venta.fecha_emision).all())
+    diarios = dict(ventas_con_tasa(
+        Venta.fecha_emision, func.sum(VENTA_USD)
+    ).filter(Venta.fecha_emision >= desde, sin_excluidas).group_by(Venta.fecha_emision).all())
     ultimos_7_dias = [
         {'fecha': (desde + timedelta(days=i)).isoformat(), 'total': round(float(diarios.get(desde + timedelta(days=i), 0)), 2)}
         for i in range(7)
@@ -567,6 +676,14 @@ def analisis_ventas():
         ano=ano,
         meses_disponibles=[{'mes': m, 'ano': a} for a, m in meses_disponibles],
         total_mes=round(sum(s['total'] for s in sucursales), 2),
+        total_bruto=round(float(total_bruto or 0), 2),
+        # Días del mes con ventas cuyo USD se calculó con FACTOR por no haber tasa interna cargada.
+        dias_sin_tasa_interna=int(dias_sin_tasa or 0),
+        excepciones=[
+            {'id': e['id'], 'nombre': e['nombre'], 'categoria': e['categoria'],
+             'excluida': e['id'] in excluir, 'monto': round(float(montos_excepcion.get(e['id']) or 0), 2)}
+            for e in EXCEPCIONES
+        ],
         grupos_principales=principales,
         sucursales=sucursales,
         ultimos_7_dias=ultimos_7_dias,
@@ -587,7 +704,7 @@ def capital_estancado():
 
     ultima_venta = dict(db.session.query(
         Venta.articulo_codigo, func.max(Venta.fecha_emision)
-    ).filter(Venta.cantidad_neta > 0).group_by(Venta.articulo_codigo).all())
+    ).filter(Venta.cantidad_neta > 0, ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo).all())
 
     almacen, por_sucursal = {}, {}
     for codigo, origen, sucursal, total in db.session.query(
@@ -648,10 +765,33 @@ def capital_estancado():
 
 @app.route('/api/tasas', methods=['GET'])
 def listar_tasas():
-    tasas = TasaInterna.query.order_by(TasaInterna.fecha.desc()).limit(5).all()
-    return jsonify(success=True, tasas=[
-        {'fecha': t.fecha.isoformat(), 'tasa_paralelo': float(t.tasa_paralelo)} for t in tasas
-    ])
+    """Tasas BCV e interna vigentes en ?fecha= (por defecto hoy) y el historial de los ?dias= anteriores."""
+    fecha = parsear_fecha(request.args.get('fecha')) or datetime.today().date()
+    dias = request.args.get('dias', default=30, type=int)
+
+    def vigente(columna):
+        # Última tasa registrada en o antes de la fecha (fines de semana y feriados no tienen tasa BCV propia).
+        t = TasaInterna.query.filter(TasaInterna.fecha <= fecha, columna.isnot(None)).order_by(TasaInterna.fecha.desc()).first()
+        return {'fecha': t.fecha.isoformat(), 'valor': float(getattr(t, columna.key))} if t else None
+
+    historial = TasaInterna.query.filter(
+        TasaInterna.fecha <= fecha, TasaInterna.fecha > fecha - timedelta(days=dias)
+    ).order_by(TasaInterna.fecha.desc()).all()
+    desde, hasta = db.session.query(func.min(TasaInterna.fecha), func.max(TasaInterna.fecha)).one()
+
+    return jsonify(
+        success=True,
+        fecha=fecha.isoformat(),
+        bcv=vigente(TasaInterna.tasa_bcv),
+        interna=vigente(TasaInterna.tasa_paralelo),
+        rango={'desde': desde.isoformat() if desde else None, 'hasta': hasta.isoformat() if hasta else None},
+        historial=[
+            {'fecha': t.fecha.isoformat(),
+             'bcv': float(t.tasa_bcv) if t.tasa_bcv is not None else None,
+             'interna': float(t.tasa_paralelo) if t.tasa_paralelo is not None else None}
+            for t in historial
+        ],
+    )
 
 
 @app.route('/api/tasas', methods=['POST'])
@@ -700,7 +840,13 @@ def archivo_muy_grande(_):
     return jsonify(success=False, error="El archivo supera el límite de 25 MB."), 413
 
 
-COLUMNAS_AGREGADAS = [('ventas', 'sucursal', 'VARCHAR(100)'), ('inventarios', 'sucursal', 'VARCHAR(100)')]
+COLUMNAS_AGREGADAS = [
+    ('ventas', 'sucursal', 'VARCHAR(100)'),
+    ('inventarios', 'sucursal', 'VARCHAR(100)'),
+    ('ventas', 'factura_bs', 'NUMERIC(16,4)'),
+    ('ventas', 'excepcion', 'VARCHAR(50)'),
+    ('tasas_internas', 'tasa_bcv', 'NUMERIC(12,4)'),
+]
 
 
 def migrar_esquema():
@@ -710,6 +856,10 @@ def migrar_esquema():
         if columna not in {c['name'] for c in inspector.get_columns(tabla)}:
             with db.engine.begin() as conexion:
                 conexion.execute(text(f'ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}'))
+    # tasa_paralelo era obligatoria; ahora una fecha puede tener solo tasa BCV.
+    if db.engine.dialect.name == 'postgresql':
+        with db.engine.begin() as conexion:
+            conexion.execute(text('ALTER TABLE tasas_internas ALTER COLUMN tasa_paralelo DROP NOT NULL'))
 
 
 if __name__ == '__main__':
