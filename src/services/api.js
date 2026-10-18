@@ -28,7 +28,8 @@ export async function obtenerTrasladosSugeridos(dias) {
     }))
     .sort(
       (a, b) =>
-        ORDEN_ABC[a.clasificacion_abc] - ORDEN_ABC[b.clasificacion_abc] || b.cantidad_sugerida - a.cantidad_sugerida
+        (ORDEN_ABC[a.clasificacion_abc] ?? 3) - (ORDEN_ABC[b.clasificacion_abc] ?? 3) ||
+        b.cantidad_sugerida - a.cantidad_sugerida
     );
 }
 

@@ -12,6 +12,7 @@ function Ruta({ origen, destino }) {
 }
 
 function StockDestino({ valor }) {
+  if (valor == null) return <span className="text-slate-400">–</span>;
   return (
     <span className={valor < STOCK_CRITICO ? 'font-semibold text-red-600' : 'text-slate-700'}>{valor}</span>
   );
