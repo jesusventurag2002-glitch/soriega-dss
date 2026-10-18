@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Database, AlertTriangle, CheckCircle2, XCircle, Loader2, Upload, FileText, ChevronDown } from 'lucide-react';
+import { Database, AlertTriangle, CheckCircle2, XCircle, Loader2, Upload, FileText, ChevronDown, Store } from 'lucide-react';
 import FileDropzone from './FileDropzone.jsx';
 import { cargarArchivoInicial } from '../services/api.js';
+import { capitalizar } from '../utils/formato.js';
 
 const TIPOS_REPORTE = [
   { value: 'ventas', label: 'Historial de Ventas' },
@@ -28,20 +29,28 @@ function Alerta({ tipo, texto, onCerrar }) {
   );
 }
 
+// "VENTAS BARCELONA.XLS" -> "Barcelona"
+const sugerirSucursal = (nombreArchivo) =>
+  capitalizar(nombreArchivo.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').replace(/\bventas?\b/gi, '').trim());
+
 export default function ConfiguracionInicial() {
   const [tipoReporte, setTipoReporte] = useState(TIPOS_REPORTE[0].value);
   const [archivo, setArchivo] = useState(null);
+  const [sucursal, setSucursal] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [mensaje, setMensaje] = useState(null); // { tipo: 'exito' | 'error', texto }
 
+  const esVentas = tipoReporte === 'ventas';
+  const faltaSucursal = esVentas && !sucursal.trim();
+
   const procesar = async (e) => {
     e.preventDefault();
-    if (!archivo) return;
+    if (!archivo || faltaSucursal) return;
 
     setIsLoading(true);
     setMensaje(null);
     try {
-      const data = await cargarArchivoInicial(tipoReporte, archivo);
+      const data = await cargarArchivoInicial(tipoReporte, archivo, esVentas ? sucursal.trim() : null);
       if (data.success) {
         setMensaje({ tipo: 'exito', texto: data.message || 'Archivo procesado correctamente.' });
         setArchivo(null);
@@ -109,18 +118,41 @@ export default function ConfiguracionInicial() {
               deshabilitado={isLoading}
               onSeleccionar={(f) => {
                 setArchivo(f);
+                if (f) setSucursal(sugerirSucursal(f.name));
                 setMensaje(null);
               }}
               onError={(texto) => setMensaje({ tipo: 'error', texto })}
             />
           </div>
+
+          {esVentas && (
+            <div>
+              <label htmlFor="sucursal" className="mb-2 block text-sm font-medium text-slate-700">
+                3. Sucursal
+              </label>
+              <div className="relative">
+                <Store className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  id="sucursal"
+                  type="text"
+                  value={sucursal}
+                  onChange={(e) => setSucursal(e.target.value)}
+                  placeholder="Ej. Barcelona"
+                  className="w-full rounded-xl border border-slate-300 bg-white py-3 pl-10 pr-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+              <p className="mt-1.5 text-xs text-slate-500">
+                El reporte no indica la sucursal. Al cargarlo se reemplazan solo las ventas de esta sucursal.
+              </p>
+            </div>
+          )}
         </fieldset>
 
         {mensaje && <Alerta {...mensaje} onCerrar={() => setMensaje(null)} />}
 
         <button
           type="submit"
-          disabled={!archivo || isLoading}
+          disabled={!archivo || faltaSucursal || isLoading}
           className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-6 py-3 text-sm font-semibold text-white hover:bg-slate-800 transition disabled:cursor-not-allowed disabled:bg-slate-300"
         >
           {isLoading ? (

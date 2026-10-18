@@ -42,10 +42,20 @@ export async function obtenerCapitalEstancado(diasMin, limite = 100) {
   return data;
 }
 
-export async function cargarArchivoInicial(tipoReporte, archivo) {
+// Ventas de un mes por sucursal y grupo. Sin periodo, el backend usa el mes de la última venta registrada.
+export async function obtenerAnalisisVentas(periodo) {
+  const query = periodo ? `?mes=${periodo.mes}&ano=${periodo.ano}` : '';
+  const respuesta = await fetch(`${API_URL}/api/ventas/analisis${query}`);
+  const data = await respuesta.json();
+  if (!data.success) throw new Error(data.error || 'No se pudo obtener el análisis de ventas.');
+  return data;
+}
+
+export async function cargarArchivoInicial(tipoReporte, archivo, sucursal) {
   const formData = new FormData();
   formData.append('tipo_reporte', tipoReporte);
   formData.append('archivo', archivo);
+  if (sucursal) formData.append('sucursal', sucursal);
 
   const respuesta = await fetch(`${API_URL}/api/carga_inicial`, {
     method: 'POST',

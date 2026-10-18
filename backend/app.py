@@ -1,13 +1,13 @@
 import io
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func
+from sqlalchemy import func, inspect, or_, text
 
 app = Flask(__name__)
 
@@ -61,6 +61,7 @@ class Venta(db.Model):
     costo_real_usd = db.Column(db.Numeric(12, 4), default=0.0000)
     utilidad_real_usd = db.Column(db.Numeric(12, 4), default=0.0000)
     fecha_emision = db.Column(db.Date, nullable=False)
+    sucursal = db.Column(db.String(100))  # indicada al cargar el reporte; el archivo no la trae
 
 
 # ==================== UTILIDADES DE PARSEO ====================
@@ -181,9 +182,10 @@ def leer_archivo(archivo, tipo_reporte):
 
 
 # ==================== PROCESAMIENTO DE CARGAS ====================
-def cargar_ventas(df):
+def cargar_ventas(df, sucursal):
+    # Reemplaza solo las ventas de esta sucursal (y las de cargas antiguas sin sucursal).
     # Sin commit intermedio: si algo falla, el rollback conserva las ventas previas.
-    Venta.query.delete()
+    Venta.query.filter(or_(Venta.sucursal == sucursal, Venta.sucursal.is_(None))).delete(synchronize_session=False)
 
     tiene_fact = 'fact' in df.columns
     tiene_costo = 'costo' in df.columns
@@ -235,13 +237,13 @@ def cargar_ventas(df):
             cantidad_neta=cantidad_neta, precio_fin_moneda_local=precio_local,
             factor_sistema=f_sistema, factura_real_usd=factura_real,
             costo_real_usd=costo_real, utilidad_real_usd=factura_real - costo_real,
-            fecha_emision=fecha_emision,
+            fecha_emision=fecha_emision, sucursal=sucursal,
         ))
 
     db.session.add_all(ventas)
     db.session.commit()
 
-    mensaje = f"Historial de ventas cargado: {len(ventas)} registros."
+    mensaje = f"Historial de ventas de {sucursal} cargado: {len(ventas)} registros."
     if excluidas:
         mensaje += f" {excluidas} excluidos por cliente especial."
     if internas:
@@ -319,11 +321,14 @@ def carga_inicial():
         return jsonify(success=False, error=f"tipo_reporte inválido. Opciones: {', '.join(sorted(TIPOS_REPORTE))}."), 400
     if not archivo or not archivo.filename:
         return jsonify(success=False, error="No se recibió ningún archivo."), 400
+    sucursal = texto(request.form.get('sucursal')).title()
+    if tipo_reporte == 'ventas' and not sucursal:
+        return jsonify(success=False, error="Indica la sucursal a la que pertenece el historial de ventas."), 400
 
     try:
         df = leer_archivo(archivo, tipo_reporte)
         if tipo_reporte == 'ventas':
-            mensaje = cargar_ventas(df)
+            mensaje = cargar_ventas(df, sucursal)
         else:
             mensaje = cargar_inventario(df, 'INV' if tipo_reporte == 'inv_fisico' else 'INVAL')
         return jsonify(success=True, message=mensaje), 200
@@ -442,6 +447,75 @@ def logistica():
                     })
 
     return jsonify(success=True, tipo_analisis=tipo_analisis, dias=dias, resultados=resultados)
+
+
+GRUPOS_PRINCIPALES = 5  # el resto se agrupa en "OTROS" para que el desglose sea legible
+
+
+@app.route('/api/ventas/analisis', methods=['GET'])
+def analisis_ventas():
+    """Ventas (facturación real USD) de un mes por sucursal y grupo, más la tendencia de los últimos 7 días."""
+    corte = db.session.query(func.max(Venta.fecha_emision)).scalar()
+    if corte is None:
+        return jsonify(success=False, error="No hay historial de ventas cargado."), 400
+    # Por defecto, el mes de la última venta registrada (los datos son una foto fija).
+    mes = request.args.get('mes', default=corte.month, type=int)
+    ano = request.args.get('ano', default=corte.year, type=int)
+
+    anio_col, mes_col = func.extract('year', Venta.fecha_emision), func.extract('month', Venta.fecha_emision)
+    meses_disponibles = sorted(
+        {(int(a), int(m)) for a, m in db.session.query(anio_col, mes_col).distinct()}, reverse=True
+    )
+
+    sucursal_col = func.coalesce(Venta.sucursal, 'Sin asignar').label('sucursal')
+    filas = db.session.query(
+        sucursal_col, Venta.grupo_venta, func.sum(Venta.factura_real_usd)
+    ).filter(anio_col == ano, mes_col == mes).group_by(sucursal_col, Venta.grupo_venta).all()
+
+    total_por_grupo = {}
+    for _, grupo, total in filas:
+        total_por_grupo[grupo] = total_por_grupo.get(grupo, 0) + float(total or 0)
+    principales = sorted(total_por_grupo, key=total_por_grupo.get, reverse=True)[:GRUPOS_PRINCIPALES]
+
+    por_sucursal = {}
+    for sucursal, grupo, total in filas:
+        clave = grupo if grupo in principales else 'OTROS'
+        grupos = por_sucursal.setdefault(sucursal, {})
+        grupos[clave] = grupos.get(clave, 0) + float(total or 0)
+
+    sucursales = sorted(
+        (
+            {
+                'sucursal': sucursal,
+                'total': round(sum(grupos.values()), 2),
+                # Orden fijo (principales y luego OTROS) para que cada grupo conserve su color y posición.
+                'grupos': [{'grupo': g, 'total': round(grupos[g], 2)} for g in principales + ['OTROS'] if g in grupos],
+            }
+            for sucursal, grupos in por_sucursal.items()
+        ),
+        key=lambda s: s['total'], reverse=True,
+    )
+
+    desde = corte - timedelta(days=6)
+    diarios = dict(db.session.query(
+        Venta.fecha_emision, func.sum(Venta.factura_real_usd)
+    ).filter(Venta.fecha_emision >= desde).group_by(Venta.fecha_emision).all())
+    ultimos_7_dias = [
+        {'fecha': (desde + timedelta(days=i)).isoformat(), 'total': round(float(diarios.get(desde + timedelta(days=i), 0)), 2)}
+        for i in range(7)
+    ]
+
+    return jsonify(
+        success=True,
+        fecha_corte=corte.isoformat(),
+        mes=mes,
+        ano=ano,
+        meses_disponibles=[{'mes': m, 'ano': a} for a, m in meses_disponibles],
+        total_mes=round(sum(s['total'] for s in sucursales), 2),
+        grupos_principales=principales,
+        sucursales=sucursales,
+        ultimos_7_dias=ultimos_7_dias,
+    )
 
 
 @app.route('/api/capital_estancado', methods=['GET'])
@@ -565,7 +639,16 @@ def archivo_muy_grande(_):
     return jsonify(success=False, error="El archivo supera el límite de 25 MB."), 413
 
 
+def migrar_esquema():
+    """create_all no agrega columnas a tablas existentes: se añaden aquí las incorporadas después."""
+    columnas = {c['name'] for c in inspect(db.engine).get_columns('ventas')}
+    if 'sucursal' not in columnas:
+        with db.engine.begin() as conexion:
+            conexion.execute(text('ALTER TABLE ventas ADD COLUMN sucursal VARCHAR(100)'))
+
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        migrar_esquema()
     app.run(host='127.0.0.1', port=5000, debug=os.getenv('FLASK_DEBUG') == '1', use_reloader=False)
