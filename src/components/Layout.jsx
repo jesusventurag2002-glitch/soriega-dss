@@ -1,7 +1,12 @@
-import { Boxes, LogOut } from 'lucide-react';
+import { Boxes, LogOut, LayoutDashboard, Database } from 'lucide-react';
 import AlertBell from './AlertBell.jsx';
 
-export default function Layout({ usuario, onLogout, children }) {
+const VISTAS = [
+  { id: 'dashboard', texto: 'Traslados', icono: LayoutDashboard },
+  { id: 'configuracion', texto: 'Configuración inicial', icono: Database },
+];
+
+export default function Layout({ usuario, vista, onCambiarVista, onLogout, children }) {
   const iniciales = usuario.nombre
     .split(' ')
     .map((p) => p[0])
@@ -42,6 +47,22 @@ export default function Layout({ usuario, onLogout, children }) {
             </div>
           </div>
         </div>
+
+        <nav className="mx-auto max-w-7xl px-4 sm:px-6 flex gap-1 overflow-x-auto">
+          {VISTAS.map(({ id, texto, icono: Icono }) => (
+            <button
+              key={id}
+              onClick={() => onCambiarVista(id)}
+              className={`inline-flex items-center gap-2 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition ${
+                vista === id
+                  ? 'border-slate-900 text-slate-900'
+                  : 'border-transparent text-slate-500 hover:text-slate-900'
+              }`}
+            >
+              <Icono className="h-4 w-4" /> {texto}
+            </button>
+          ))}
+        </nav>
       </header>
 
       <main className="mx-auto max-w-7xl px-4 sm:px-6 py-6">{children}</main>
