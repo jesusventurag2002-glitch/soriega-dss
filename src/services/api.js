@@ -57,7 +57,9 @@ export const editarTraslado = (id, version, cambios) =>
   pedir(`/api/traslados/${id}`, { metodo: 'PATCH', cuerpo: { version, ...cambios } }).then((d) => d.traslado);
 export const accionTraslado = (id, accion, version, extra = {}) =>
   pedir(`/api/traslados/${id}/acciones`, { metodo: 'POST', cuerpo: { accion, version, ...extra } }).then((d) => d.traslado);
-export const generarTraslados = (dias) => pedir('/api/traslados/generar', { metodo: 'POST', cuerpo: { dias } });
+export const generarTraslados = (dias, clases) => pedir('/api/traslados/generar', { metodo: 'POST', cuerpo: { dias, clases } });
+export const retirarArticulo = (id, lineaId, version, comentario) =>
+  pedir(`/api/traslados/${id}/lineas/${lineaId}`, { metodo: 'DELETE', cuerpo: { version, comentario } }).then((d) => d.traslado);
 export const loteTraslados = (accion, items) => pedir('/api/traslados/lote', { metodo: 'POST', cuerpo: { accion, items } });
 export const crearRetorno = (datos) => pedir('/api/traslados', { metodo: 'POST', cuerpo: datos }).then((d) => d.traslado);
 

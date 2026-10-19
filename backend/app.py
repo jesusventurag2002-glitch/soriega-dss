@@ -76,10 +76,47 @@ class Venta(db.Model):
     factura_bs = db.Column(db.Numeric(16, 4))  # PRECIOFIN * 1.16 * cantidad neta; el USD se calcula con la tasa interna
     excepcion = db.Column(db.String(50))  # id de EXCEPCIONES si no es facturación comercial
 
+class DocumentoTraslado(db.Model):
+    """Documento de traslado (TR-…): agrupa los artículos de una misma ruta y lleva el ciclo de vida completo."""
+    __tablename__ = 'traslado_documentos'
+    id = db.Column(db.Integer, primary_key=True)
+    tipo = db.Column(db.String(20), nullable=False, default='reposicion')  # 'reposicion' (almacén -> sucursal) o 'retorno'
+    origen = db.Column(db.String(100), nullable=False, index=True)
+    destino = db.Column(db.String(100), nullable=False, index=True)
+    estado = db.Column(db.String(30), nullable=False, default='borrador', index=True)
+    horizonte_dias = db.Column(db.Integer)
+    motivo_rechazo = db.Column(db.Text)
+    observaciones = db.Column(db.Text)
+    creado_por = db.Column(db.String(100))
+    creado_en = db.Column(db.DateTime, nullable=False)
+    actualizado_en = db.Column(db.DateTime, nullable=False)
+    # Se incrementa en cada cambio: una acción enviada con una versión vieja (doble clic, otra pestaña) se rechaza.
+    version = db.Column(db.Integer, nullable=False, default=1)
+    lineas = db.relationship('Traslado', backref='documento', order_by='Traslado.id', lazy='selectin')
+
+class EventoDocumento(db.Model):
+    """Historial inmutable de cada documento: quién hizo qué, cuándo y con qué valores antes y después."""
+    __tablename__ = 'traslado_documento_eventos'
+    id = db.Column(db.Integer, primary_key=True)
+    documento_id = db.Column(db.Integer, db.ForeignKey('traslado_documentos.id'), nullable=False, index=True)
+    tipo = db.Column(db.String(40), nullable=False)
+    estado_anterior = db.Column(db.String(30))
+    estado_nuevo = db.Column(db.String(30))
+    usuario = db.Column(db.String(100))
+    rol = db.Column(db.String(30))
+    fecha = db.Column(db.DateTime, nullable=False, index=True)
+    detalle = db.Column(db.Text)  # JSON: {"antes": {...}, "despues": {...}, "comentario": "...", "articulos": [...]}
+
 class Traslado(db.Model):
-    """Operación de traslado entre el almacén principal y una sucursal, con su ciclo de vida."""
+    """Línea de un documento de traslado: un artículo con sus cantidades en cada etapa del ciclo.
+
+    Su estado replica el del documento (las consultas de stock comprometido y de traslados abiertos lo usan);
+    una línea retirada de un borrador queda 'descartado' con retirado_en.
+    """
     __tablename__ = 'traslados'
     id = db.Column(db.Integer, primary_key=True)
+    documento_id = db.Column(db.Integer, db.ForeignKey('traslado_documentos.id'), index=True)
+    retirado_en = db.Column(db.DateTime)
     articulo_codigo = db.Column(db.String(50), nullable=False, index=True)
     articulo_nombre = db.Column(db.String(255), nullable=False)
     clasificacion_abc = db.Column(db.String(1))
@@ -105,7 +142,7 @@ class Traslado(db.Model):
     version = db.Column(db.Integer, nullable=False, default=1)
 
 class EventoTraslado(db.Model):
-    """Historial inmutable de cada traslado: quién hizo qué, cuándo y con qué valores antes y después."""
+    """Historial por artículo anterior a los documentos de traslado; se conserva y se copia al documento al migrar."""
     __tablename__ = 'traslado_eventos'
     id = db.Column(db.Integer, primary_key=True)
     traslado_id = db.Column(db.Integer, db.ForeignKey('traslados.id'), nullable=False, index=True)
@@ -919,7 +956,8 @@ def capital_estancado():
     for t in Traslado.query.filter(Traslado.articulo_codigo.in_(codigos), Traslado.tipo == 'retorno',
                                    Traslado.estado.in_(ESTADOS_ABIERTOS)):
         retornos.setdefault(t.articulo_codigo, []).append(
-            {'id': t.id, 'folio': folio(t), 'origen': t.origen, 'estado': t.estado, 'cantidad': cantidad_vigente(t)})
+            {'id': t.documento_id, 'folio': folio(t.documento), 'origen': t.origen, 'estado': t.estado,
+             'cantidad': cantidad_vigente(t)})
     for a in articulos:
         a['acciones'] = acciones.get(a['codigo'], [])
         a['retornos'] = retornos.get(a['codigo'], [])
@@ -930,6 +968,8 @@ def capital_estancado():
 
 
 # ==================== TRASLADOS ====================
+# Un documento de traslado (TR-…) agrupa los artículos que van por una misma ruta (origen -> destino) y se
+# aprueba, despacha y recibe como una sola operación. Cada artículo es una línea (modelo Traslado).
 ALMACEN = 'Almacén Principal'
 
 ESTADOS_TRASLADO = {
@@ -990,8 +1030,8 @@ def usuario_actual():
     return nombre, rol
 
 
-def folio(t):
-    return f'TR-{t.id:05d}'
+def folio(d):
+    return f'TR-{d.id:05d}'
 
 
 def cantidad_vigente(t):
@@ -999,8 +1039,30 @@ def cantidad_vigente(t):
     return next(v for v in (t.cantidad_recibida, t.cantidad_despachada, t.cantidad_aprobada, t.cantidad_sugerida) if v is not None)
 
 
-def acciones_disponibles(t, rol):
-    return [a for a, (desde, roles) in TRANSICIONES.items() if t.estado in desde and (roles is None or rol in roles)]
+def diferencia_de(t):
+    return (t.cantidad_recibida - t.cantidad_despachada
+            if t.cantidad_recibida is not None and t.cantidad_despachada is not None else None)
+
+
+def lineas_vigentes(d):
+    return [l for l in d.lineas if l.retirado_en is None]
+
+
+ORDEN_CLASE = {'A': 0, 'B': 1, 'C': 2}
+
+
+def prioridad_linea(t):
+    """Clase ABC y luego la cobertura del destino (menos días = más urgente)."""
+    return ORDEN_CLASE.get(t.clasificacion_abc, 3), t.cobertura_dias is None, t.cobertura_dias or 0, t.id
+
+
+def acciones_disponibles(d, rol):
+    return [a for a, (desde, roles) in TRANSICIONES.items() if d.estado in desde and (roles is None or rol in roles)]
+
+
+def puede_retirar(d, rol):
+    """En borrador cualquiera ajusta el documento; en aprobación solo el gerente puede quitar un artículo."""
+    return d.estado == 'borrador' or (d.estado == 'pendiente_aprobacion' and rol == 'gerente')
 
 
 def serializar_evento(e):
@@ -1011,39 +1073,74 @@ def serializar_evento(e):
     }
 
 
-def serializar_traslado(t, rol=None, con_eventos=False):
-    diferencia = (t.cantidad_recibida - t.cantidad_despachada
-                  if t.cantidad_recibida is not None and t.cantidad_despachada is not None else None)
-    datos = {
-        'id': t.id, 'folio': folio(t), 'articulo_codigo': t.articulo_codigo, 'articulo_nombre': t.articulo_nombre,
-        'clasificacion_abc': t.clasificacion_abc, 'tipo': t.tipo, 'origen': t.origen, 'destino': t.destino,
-        'estado': t.estado, 'estado_etiqueta': ESTADOS_TRASLADO[t.estado],
-        'cantidad_sugerida': t.cantidad_sugerida, 'cantidad_aprobada': t.cantidad_aprobada,
-        'cantidad_despachada': t.cantidad_despachada, 'cantidad_recibida': t.cantidad_recibida, 'diferencia': diferencia,
+def serializar_linea(t):
+    return {
+        'id': t.id, 'articulo_codigo': t.articulo_codigo, 'articulo_nombre': t.articulo_nombre,
+        'clasificacion_abc': t.clasificacion_abc, 'cantidad_sugerida': t.cantidad_sugerida,
+        'cantidad_aprobada': t.cantidad_aprobada, 'cantidad_despachada': t.cantidad_despachada,
+        'cantidad_recibida': t.cantidad_recibida, 'diferencia': diferencia_de(t),
         'stock_origen': t.stock_origen, 'stock_destino': t.stock_destino, 'cobertura_dias': t.cobertura_dias,
-        'horizonte_dias': t.horizonte_dias, 'motivo_rechazo': t.motivo_rechazo, 'observaciones': t.observaciones,
-        'creado_por': t.creado_por, 'creado_en': t.creado_en.isoformat(timespec='seconds'),
-        'actualizado_en': t.actualizado_en.isoformat(timespec='seconds'), 'version': t.version,
-        'acciones': acciones_disponibles(t, rol), 'editable': t.estado == 'borrador',
     }
-    if con_eventos:
-        eventos = EventoTraslado.query.filter_by(traslado_id=t.id).order_by(EventoTraslado.fecha, EventoTraslado.id)
+
+
+def resumen_documento(d):
+    """Datos de un documento para listas: ruta, estado y totales de sus artículos."""
+    lineas = sorted(lineas_vigentes(d), key=prioridad_linea)
+    abc = {c: sum(1 for l in lineas if l.clasificacion_abc == c) for c in 'ABC'}
+    return {
+        'id': d.id, 'folio': folio(d), 'tipo': d.tipo, 'origen': d.origen, 'destino': d.destino, 'estado': d.estado,
+        'estado_etiqueta': ESTADOS_TRASLADO[d.estado], 'total_articulos': len(lineas),
+        'total_unidades': sum(cantidad_vigente(l) for l in lineas), 'abc': abc,
+        'clasificacion_abc': next((c for c in 'ABC' if abc[c]), None),
+        'con_diferencias': sum(1 for l in lineas if diferencia_de(l)),
+        'articulos': [l.articulo_nombre for l in lineas[:3]],
+        'actualizado_en': d.actualizado_en.isoformat(timespec='seconds'),
+    }
+
+
+def serializar_documento(d, rol=None, detalle=False):
+    datos = {
+        **resumen_documento(d),
+        'horizonte_dias': d.horizonte_dias, 'motivo_rechazo': d.motivo_rechazo, 'observaciones': d.observaciones,
+        'creado_por': d.creado_por, 'creado_en': d.creado_en.isoformat(timespec='seconds'), 'version': d.version,
+        'acciones': acciones_disponibles(d, rol), 'editable': d.estado == 'borrador', 'retirable': puede_retirar(d, rol),
+    }
+    if detalle:
+        datos['lineas'] = [serializar_linea(l) for l in sorted(lineas_vigentes(d), key=prioridad_linea)]
+        eventos = EventoDocumento.query.filter_by(documento_id=d.id).order_by(EventoDocumento.fecha, EventoDocumento.id)
         datos['eventos'] = [serializar_evento(e) for e in eventos]
     return datos
 
 
-def registrar_evento(t, tipo, usuario, estado_anterior=None, antes=None, despues=None, comentario=None):
-    detalle = {k: v for k, v in (('antes', antes), ('despues', despues), ('comentario', comentario)) if v}
-    db.session.add(EventoTraslado(
-        traslado_id=t.id, tipo=tipo, estado_anterior=estado_anterior, estado_nuevo=t.estado,
+def ref_articulo(t, antes=None, despues=None):
+    """Artículo afectado por un evento del documento, con sus valores antes y después."""
+    return {k: v for k, v in (('codigo', t.articulo_codigo), ('nombre', t.articulo_nombre), ('antes', antes),
+                              ('despues', despues)) if v is not None}
+
+
+def registrar_evento(d, tipo, usuario, estado_anterior=None, antes=None, despues=None, comentario=None, articulos=None):
+    detalle = {k: v for k, v in (('antes', antes), ('despues', despues), ('comentario', comentario),
+                                 ('articulos', articulos)) if v}
+    db.session.add(EventoDocumento(
+        documento_id=d.id, tipo=tipo, estado_anterior=estado_anterior, estado_nuevo=d.estado,
         usuario=usuario[0], rol=usuario[1], fecha=datetime.now(),
         detalle=json.dumps(detalle, ensure_ascii=False) if detalle else None,
     ))
 
 
-def tocar(t):
-    t.version += 1
-    t.actualizado_en = datetime.now()
+def fijar_estado(d, estado):
+    """El documento y sus artículos vigentes cambian de estado juntos."""
+    d.estado = estado
+    for l in lineas_vigentes(d):
+        l.estado = estado
+
+
+def tocar(d):
+    ahora = datetime.now()
+    d.version += 1
+    d.actualizado_en = ahora
+    for l in lineas_vigentes(d):
+        l.actualizado_en = ahora
 
 
 def entero(valor, campo, minimo=0):
@@ -1082,133 +1179,188 @@ def validar_disponible(t, cantidad):
     disponible = existencia - reservado
     if cantidad > disponible:
         raise ErrorTraslado(
-            f"{t.origen} tiene {max(disponible, 0)} unidades disponibles de este artículo "
+            f"{t.articulo_nombre}: {t.origen} tiene {max(disponible, 0)} unidades disponibles "
             f"(existencia {existencia}, {reservado} reservadas en otros traslados). Ajusta la cantidad.")
 
 
-def verificar_version(t, datos):
+def verificar_version(d, datos):
     version = datos.get('version')
     if version is None:
         raise ErrorTraslado("Falta la versión del traslado.")
-    if entero(version, 'La versión') != t.version:
+    if entero(version, 'La versión') != d.version:
         raise ErrorTraslado(
-            f"{folio(t)} cambió mientras lo revisabas (ahora está «{ESTADOS_TRASLADO[t.estado]}»). "
+            f"{folio(d)} cambió mientras lo revisabas (ahora está «{ESTADOS_TRASLADO[d.estado]}»). "
             "Se cargó la información actualizada; revisa antes de continuar.", 409)
 
 
-def aplicar_accion(t, accion, datos, usuario):
-    """Ejecuta una transición validando estado, rol y cantidades, y la deja registrada en el historial."""
+def cantidades_indicadas(d, datos, etiqueta, defecto=None, minimo=0):
+    """Cantidad por artículo de {"cantidades": {"<id de línea>": n}}; si falta, se usa `defecto(línea)`."""
+    indicadas = datos.get('cantidades') or {}
+    if not isinstance(indicadas, dict):
+        raise ErrorTraslado("Las cantidades deben indicarse por artículo.")
+    lineas = {str(l.id): l for l in lineas_vigentes(d)}
+    ajenas = set(map(str, indicadas)) - set(lineas)
+    if ajenas:
+        raise ErrorTraslado(f"{folio(d)} no contiene los artículos indicados ({', '.join(sorted(ajenas))}).")
+    resultado = {}
+    for clave, l in lineas.items():
+        valor = indicadas.get(clave, indicadas.get(l.id))
+        if valor in (None, ''):
+            valor = defecto(l) if defecto else None
+            if valor is None:
+                raise ErrorTraslado(f"Indica la {etiqueta.lower()} de {l.articulo_nombre}.")
+        resultado[l] = entero(valor, f"{etiqueta} de {l.articulo_nombre}", minimo)
+    return resultado
+
+
+def cambios_de(cantidades, campo_antes, campo_despues):
+    """Artículos cuya cantidad cambió respecto a la etapa anterior, para el historial."""
+    return [ref_articulo(l, {campo_antes: getattr(l, campo_antes)}, {campo_despues: n})
+            for l, n in cantidades.items() if n != getattr(l, campo_antes)]
+
+
+def aplicar_accion(d, accion, datos, usuario):
+    """Ejecuta una transición sobre el documento completo validando estado, rol y cantidades de cada artículo."""
     if accion not in TRANSICIONES:
         raise ErrorTraslado(f"Acción desconocida: {accion}.")
     desde, roles = TRANSICIONES[accion]
-    if t.estado not in desde:
-        raise ErrorTraslado(f"No se puede {VERBOS[accion]} {folio(t)} porque está «{ESTADOS_TRASLADO[t.estado]}».", 409)
+    if d.estado not in desde:
+        raise ErrorTraslado(f"No se puede {VERBOS[accion]} {folio(d)} porque está «{ESTADOS_TRASLADO[d.estado]}».", 409)
     if roles and usuario[1] not in roles:
         raise ErrorTraslado(f"Solo un gerente puede {VERBOS[accion]} un traslado.", 403)
+    lineas = lineas_vigentes(d)
+    if not lineas:
+        raise ErrorTraslado(f"{folio(d)} no tiene artículos.")
 
-    anterior = t.estado
+    anterior = d.estado
     comentario = texto(datos.get('comentario'))
     if accion == 'enviar':
-        validar_disponible(t, t.cantidad_sugerida)
-        t.estado = 'pendiente_aprobacion'
-        registrar_evento(t, 'enviado_aprobacion', usuario, anterior, comentario=comentario)
+        for l in lineas:
+            validar_disponible(l, l.cantidad_sugerida)
+        fijar_estado(d, 'pendiente_aprobacion')
+        registrar_evento(d, 'enviado_aprobacion', usuario, anterior, comentario=comentario)
     elif accion == 'descartar':
-        t.estado = 'descartado'
-        t.motivo_rechazo = comentario or None
-        registrar_evento(t, 'descartado', usuario, anterior, comentario=comentario)
+        d.motivo_rechazo = comentario or None
+        fijar_estado(d, 'descartado')
+        registrar_evento(d, 'descartado', usuario, anterior, comentario=comentario)
     elif accion == 'aprobar':
-        cantidad = entero(datos.get('cantidad', t.cantidad_sugerida), 'La cantidad aprobada', 1)
-        validar_disponible(t, cantidad)
-        t.cantidad_aprobada = cantidad
-        t.estado = 'aprobado'
-        registrar_evento(t, 'aprobado', usuario, anterior, antes={'cantidad_sugerida': t.cantidad_sugerida},
-                         despues={'cantidad_aprobada': cantidad}, comentario=comentario)
+        cantidades = cantidades_indicadas(d, datos, 'La cantidad aprobada', lambda l: l.cantidad_sugerida, 1)
+        for l, n in cantidades.items():
+            validar_disponible(l, n)
+        cambios = cambios_de(cantidades, 'cantidad_sugerida', 'cantidad_aprobada')
+        for l, n in cantidades.items():
+            l.cantidad_aprobada = n
+        fijar_estado(d, 'aprobado')
+        registrar_evento(d, 'aprobado', usuario, anterior, despues={'unidades_aprobadas': sum(cantidades.values())},
+                         comentario=comentario, articulos=cambios)
     elif accion == 'rechazar':
         motivo = texto(datos.get('motivo'))
         if len(motivo) < 3:
             raise ErrorTraslado("Indica el motivo del rechazo.")
-        t.motivo_rechazo = motivo
-        t.estado = 'rechazado'
-        registrar_evento(t, 'rechazado', usuario, anterior, comentario=motivo)
+        d.motivo_rechazo = motivo
+        fijar_estado(d, 'rechazado')
+        registrar_evento(d, 'rechazado', usuario, anterior, comentario=motivo)
     elif accion == 'despachar':
-        cantidad = entero(datos.get('cantidad', t.cantidad_aprobada), 'La cantidad despachada', 1)
-        if cantidad > t.cantidad_aprobada:
-            raise ErrorTraslado(f"No se puede despachar más de lo aprobado ({t.cantidad_aprobada}).")
-        t.cantidad_despachada = cantidad
-        t.estado = 'despachado'
-        registrar_evento(t, 'despachado', usuario, anterior, antes={'cantidad_aprobada': t.cantidad_aprobada},
-                         despues={'cantidad_despachada': cantidad}, comentario=comentario)
+        cantidades = cantidades_indicadas(d, datos, 'La cantidad despachada', lambda l: l.cantidad_aprobada, 0)
+        for l, n in cantidades.items():
+            if n > l.cantidad_aprobada:
+                raise ErrorTraslado(f"{l.articulo_nombre}: no se puede despachar más de lo aprobado ({l.cantidad_aprobada}).")
+        if not sum(cantidades.values()):
+            raise ErrorTraslado("Indica al menos un artículo despachado.")
+        cambios = cambios_de(cantidades, 'cantidad_aprobada', 'cantidad_despachada')
+        for l, n in cantidades.items():
+            l.cantidad_despachada = n
+        fijar_estado(d, 'despachado')
+        registrar_evento(d, 'despachado', usuario, anterior, despues={'unidades_despachadas': sum(cantidades.values())},
+                         comentario=comentario, articulos=cambios)
     elif accion == 'recibir':
-        if datos.get('cantidad') in (None, ''):
-            raise ErrorTraslado("Indica la cantidad recibida.")
-        cantidad = entero(datos['cantidad'], 'La cantidad recibida', 0)
-        diferencia = cantidad - t.cantidad_despachada
-        if diferencia and len(comentario) < 3:
-            raise ErrorTraslado("La cantidad recibida no coincide con la despachada: describe la diferencia en las observaciones.")
-        t.cantidad_recibida = cantidad
-        t.estado = 'recibido_con_diferencias' if diferencia else 'recibido'
-        registrar_evento(t, t.estado, usuario, anterior, antes={'cantidad_despachada': t.cantidad_despachada},
-                         despues={'cantidad_recibida': cantidad, 'diferencia': diferencia}, comentario=comentario)
+        cantidades = cantidades_indicadas(d, datos, 'La cantidad recibida')
+        cambios = cambios_de(cantidades, 'cantidad_despachada', 'cantidad_recibida')
+        if cambios and len(comentario) < 3:
+            raise ErrorTraslado("Lo recibido no coincide con lo despachado: describe la diferencia en las observaciones.")
+        for l, n in cantidades.items():
+            l.cantidad_recibida = n
+        fijar_estado(d, 'recibido_con_diferencias' if cambios else 'recibido')
+        for c in cambios:
+            c['despues']['diferencia'] = c['despues']['cantidad_recibida'] - c['antes']['cantidad_despachada']
+        registrar_evento(d, d.estado, usuario, anterior, despues={'unidades_recibidas': sum(cantidades.values())},
+                         comentario=comentario, articulos=cambios)
     elif accion == 'cerrar':
-        if t.estado == 'recibido_con_diferencias' and len(comentario) < 3:
+        if d.estado == 'recibido_con_diferencias' and len(comentario) < 3:
             raise ErrorTraslado("Para cerrar un traslado con diferencias, registra cómo se concilió.")
-        t.estado = 'cerrado'
-        registrar_evento(t, 'cerrado', usuario, anterior, comentario=comentario)
-    tocar(t)
+        fijar_estado(d, 'cerrado')
+        registrar_evento(d, 'cerrado', usuario, anterior, comentario=comentario)
+    tocar(d)
 
 
-def respuesta_error_traslado(e, t=None):
+def respuesta_error_traslado(e, d=None):
     db.session.rollback()
     cuerpo = {'success': False, 'error': str(e)}
-    if t is not None and e.status == 409:
+    if d is not None and e.status == 409:
         # El cliente recibe el estado real para no mostrar algo que contradiga al servidor.
-        cuerpo['traslado'] = serializar_traslado(db.session.get(Traslado, t.id), usuario_actual()[1], con_eventos=True)
+        cuerpo['traslado'] = serializar_documento(db.session.get(DocumentoTraslado, d.id), usuario_actual()[1], detalle=True)
     return jsonify(cuerpo), e.status
 
 
-def obtener_traslado(id_):
-    t = db.session.get(Traslado, id_)
-    if t is None:
+def obtener_documento(id_):
+    d = db.session.get(DocumentoTraslado, id_)
+    if d is None:
         raise ErrorTraslado(f"El traslado TR-{id_:05d} no existe.", 404)
-    return t
+    return d
 
 
+# Agregados de los artículos vigentes de cada documento, para ordenar la bandeja.
+LINEAS_DEL_DOCUMENTO = and_(Traslado.documento_id == DocumentoTraslado.id, Traslado.retirado_en.is_(None))
 ORDEN_ABC = case((Traslado.clasificacion_abc == 'A', 0), (Traslado.clasificacion_abc == 'B', 1),
                  (Traslado.clasificacion_abc == 'C', 2), else_=3)
-ORDEN_ESTADO = case(*[(Traslado.estado == e, i) for i, e in enumerate(ESTADOS_TRASLADO)], else_=99)
+
+
+def agregado_lineas(expresion):
+    return db.select(expresion).where(LINEAS_DEL_DOCUMENTO).correlate(DocumentoTraslado).scalar_subquery()
+
+
+MEJOR_ABC = agregado_lineas(func.min(ORDEN_ABC))
+MENOR_COBERTURA = agregado_lineas(func.coalesce(func.min(Traslado.cobertura_dias), 1e9))
+TOTAL_UNIDADES = agregado_lineas(func.sum(func.coalesce(
+    Traslado.cantidad_recibida, Traslado.cantidad_despachada, Traslado.cantidad_aprobada, Traslado.cantidad_sugerida)))
+ORDEN_ESTADO = case(*[(DocumentoTraslado.estado == e, i) for i, e in enumerate(ESTADOS_TRASLADO)], else_=99)
 ORDENES = {
-    # Prioridad: clase ABC y luego la sucursal con menos días de cobertura.
-    'prioridad': [ORDEN_ABC, Traslado.cobertura_dias.is_(None), Traslado.cobertura_dias, Traslado.id],
-    'estado': [ORDEN_ESTADO, ORDEN_ABC, Traslado.id],
-    'cantidad': [Traslado.cantidad_sugerida.desc(), Traslado.id],
-    'reciente': [Traslado.actualizado_en.desc(), Traslado.id.desc()],
-    'producto': [Traslado.articulo_nombre, Traslado.id],
+    # Prioridad: el artículo de mayor clase ABC y luego la cobertura más baja del destino.
+    'prioridad': [MEJOR_ABC, MENOR_COBERTURA, DocumentoTraslado.id],
+    'estado': [ORDEN_ESTADO, MEJOR_ABC, DocumentoTraslado.id],
+    'cantidad': [TOTAL_UNIDADES.desc(), DocumentoTraslado.id],
+    'reciente': [DocumentoTraslado.actualizado_en.desc(), DocumentoTraslado.id.desc()],
+    'ruta': [DocumentoTraslado.destino, DocumentoTraslado.origen, DocumentoTraslado.id],
 }
 
 
-def filtrar_traslados(args):
-    q = Traslado.query
+def con_lineas(*condiciones):
+    return DocumentoTraslado.lineas.any(and_(Traslado.retirado_en.is_(None), *condiciones))
+
+
+def filtrar_documentos(args):
+    q = DocumentoTraslado.query
     for campo in ('origen', 'destino', 'tipo'):
         if args.get(campo):
-            q = q.filter(getattr(Traslado, campo) == args[campo])
+            q = q.filter(getattr(DocumentoTraslado, campo) == args[campo])
     if args.get('abc'):
-        q = q.filter(Traslado.clasificacion_abc == args['abc'].upper())
+        q = q.filter(con_lineas(Traslado.clasificacion_abc == args['abc'].upper()))
     if args.get('sucursal'):
-        q = q.filter(or_(Traslado.origen == args['sucursal'], Traslado.destino == args['sucursal']))
+        q = q.filter(or_(DocumentoTraslado.origen == args['sucursal'], DocumentoTraslado.destino == args['sucursal']))
     termino = texto(args.get('q')).lower()
     if termino:
-        condiciones = [func.lower(Traslado.articulo_nombre).like(f'%{termino}%'),
-                       func.lower(Traslado.articulo_codigo).like(f'%{termino}%')]
+        condiciones = [con_lineas(or_(func.lower(Traslado.articulo_nombre).like(f'%{termino}%'),
+                                      func.lower(Traslado.articulo_codigo).like(f'%{termino}%')))]
         coincidencia_folio = re.fullmatch(r'(?:tr-?)?0*(\d+)', termino)
         if coincidencia_folio:
-            condiciones.append(Traslado.id == int(coincidencia_folio.group(1)))
+            condiciones.append(DocumentoTraslado.id == int(coincidencia_folio.group(1)))
         q = q.filter(or_(*condiciones))
     return q
 
 
 @app.route('/api/traslados', methods=['GET'])
 def listar_traslados():
-    """Bandeja de traslados con filtros, orden y paginación; conteos por pestaña con los mismos filtros."""
+    """Bandeja de documentos de traslado con filtros, orden y paginación; conteos por pestaña con los mismos filtros."""
     rol = usuario_actual()[1]
     grupo = request.args.get('grupo', 'activos')
     if grupo not in GRUPOS_ESTADO:
@@ -1216,11 +1368,11 @@ def listar_traslados():
     orden = request.args.get('orden', 'prioridad')
     por_pagina = min(max(request.args.get('por_pagina', default=25, type=int), 1), 100)
 
-    base = filtrar_traslados(request.args)
-    por_estado = dict(base.with_entities(Traslado.estado, func.count()).group_by(Traslado.estado).all())
+    base = filtrar_documentos(request.args)
+    por_estado = dict(base.with_entities(DocumentoTraslado.estado, func.count()).group_by(DocumentoTraslado.estado).all())
     conteos = {g: sum(por_estado.get(e, 0) for e in estados) for g, estados in GRUPOS_ESTADO.items()}
 
-    consulta = base.filter(Traslado.estado.in_(GRUPOS_ESTADO[grupo])).order_by(*ORDENES.get(orden, ORDENES['prioridad']))
+    consulta = base.filter(DocumentoTraslado.estado.in_(GRUPOS_ESTADO[grupo])).order_by(*ORDENES.get(orden, ORDENES['prioridad']))
     total = consulta.count()
     paginas = max((total + por_pagina - 1) // por_pagina, 1)
     # Si la página pedida dejó de existir (p. ej. tras aprobar el último de ella), se devuelve la última válida.
@@ -1228,11 +1380,11 @@ def listar_traslados():
     items = consulta.offset((pagina - 1) * por_pagina).limit(por_pagina).all()
 
     return jsonify(
-        success=True, items=[serializar_traslado(t, rol) for t in items], total=total, pagina=pagina,
+        success=True, items=[serializar_documento(d, rol) for d in items], total=total, pagina=pagina,
         paginas=paginas, por_pagina=por_pagina, conteos=conteos,
         opciones={
-            'origenes': sorted(o for (o,) in db.session.query(Traslado.origen).distinct()),
-            'destinos': sorted(d for (d,) in db.session.query(Traslado.destino).distinct()),
+            'origenes': sorted(o for (o,) in db.session.query(DocumentoTraslado.origen).distinct()),
+            'destinos': sorted(d for (d,) in db.session.query(DocumentoTraslado.destino).distinct()),
         },
     )
 
@@ -1240,62 +1392,101 @@ def listar_traslados():
 @app.route('/api/traslados/<int:id_>', methods=['GET'])
 def detalle_traslado(id_):
     try:
-        t = obtener_traslado(id_)
+        d = obtener_documento(id_)
     except ErrorTraslado as e:
         return respuesta_error_traslado(e)
-    return jsonify(success=True, traslado=serializar_traslado(t, usuario_actual()[1], con_eventos=True))
+    return jsonify(success=True, traslado=serializar_documento(d, usuario_actual()[1], detalle=True))
 
 
 @app.route('/api/traslados/<int:id_>', methods=['PATCH'])
 def editar_traslado(id_):
-    """Ajusta la cantidad sugerida (solo en borrador) o las observaciones; cada cambio queda en el historial."""
+    """{"version": 3, "lineas": [{"id": 8, "cantidad_sugerida": 20}], "observaciones": "..."}
+
+    Las cantidades solo se ajustan en borrador; cada cambio queda en el historial del documento.
+    """
     datos = request.get_json(silent=True) or {}
     usuario = usuario_actual()
-    t = None
+    d = None
     try:
-        t = obtener_traslado(id_)
-        verificar_version(t, datos)
+        d = obtener_documento(id_)
+        verificar_version(d, datos)
         cambios = False
-        if 'cantidad_sugerida' in datos:
-            if t.estado != 'borrador':
-                raise ErrorTraslado("La cantidad solo se puede editar mientras el traslado es un borrador.", 409)
-            cantidad = entero(datos['cantidad_sugerida'], 'La cantidad', 1)
-            if cantidad != t.cantidad_sugerida:
-                validar_disponible(t, cantidad)
-                registrar_evento(t, 'cantidad_modificada', usuario, t.estado,
-                                 antes={'cantidad_sugerida': t.cantidad_sugerida}, despues={'cantidad_sugerida': cantidad},
-                                 comentario=texto(datos.get('comentario')))
-                t.cantidad_sugerida = cantidad
+        if datos.get('lineas'):
+            if d.estado != 'borrador':
+                raise ErrorTraslado("Las cantidades solo se pueden editar mientras el traslado es un borrador.", 409)
+            vigentes = {l.id: l for l in lineas_vigentes(d)}
+            modificados = []
+            for item in datos['lineas']:
+                l = vigentes.get(entero((item or {}).get('id'), 'El artículo', 1))
+                if l is None:
+                    raise ErrorTraslado(f"{folio(d)} no contiene ese artículo.")
+                cantidad = entero(item.get('cantidad_sugerida'), f"La cantidad de {l.articulo_nombre}", 1)
+                if cantidad != l.cantidad_sugerida:
+                    validar_disponible(l, cantidad)
+                    modificados.append(ref_articulo(l, {'cantidad_sugerida': l.cantidad_sugerida}, {'cantidad_sugerida': cantidad}))
+                    l.cantidad_sugerida = cantidad
+            if modificados:
+                registrar_evento(d, 'cantidad_modificada', usuario, d.estado, comentario=texto(datos.get('comentario')),
+                                 articulos=modificados)
                 cambios = True
         if 'observaciones' in datos:
             nuevas = texto(datos['observaciones']) or None
-            if nuevas != t.observaciones:
-                registrar_evento(t, 'observaciones', usuario, t.estado,
-                                 antes={'observaciones': t.observaciones}, despues={'observaciones': nuevas})
-                t.observaciones = nuevas
+            if nuevas != d.observaciones:
+                registrar_evento(d, 'observaciones', usuario, d.estado,
+                                 antes={'observaciones': d.observaciones}, despues={'observaciones': nuevas})
+                d.observaciones = nuevas
                 cambios = True
         if cambios:
-            tocar(t)
+            tocar(d)
             db.session.commit()
     except ErrorTraslado as e:
-        return respuesta_error_traslado(e, t)
-    return jsonify(success=True, traslado=serializar_traslado(t, usuario[1], con_eventos=True))
+        return respuesta_error_traslado(e, d)
+    return jsonify(success=True, traslado=serializar_documento(d, usuario[1], detalle=True))
+
+
+@app.route('/api/traslados/<int:id_>/lineas/<int:linea_id>', methods=['DELETE'])
+def retirar_articulo(id_, linea_id):
+    """Quita un artículo del documento sin afectar al resto; queda registrado en el historial."""
+    datos = request.get_json(silent=True) or {}
+    usuario = usuario_actual()
+    d = None
+    try:
+        d = obtener_documento(id_)
+        verificar_version(d, datos)
+        if not puede_retirar(d, usuario[1]):
+            raise ErrorTraslado(
+                f"No se pueden quitar artículos de {folio(d)} porque está «{ESTADOS_TRASLADO[d.estado]}».", 409)
+        vigentes = lineas_vigentes(d)
+        l = next((x for x in vigentes if x.id == linea_id), None)
+        if l is None:
+            raise ErrorTraslado(f"{folio(d)} no contiene ese artículo.", 404)
+        if len(vigentes) == 1:
+            raise ErrorTraslado("Es el único artículo del documento: descarta o rechaza el traslado completo.")
+        l.retirado_en = datetime.now()
+        l.estado = 'descartado'
+        registrar_evento(d, 'articulo_retirado', usuario, d.estado, comentario=texto(datos.get('comentario')),
+                         articulos=[ref_articulo(l, {'cantidad_sugerida': l.cantidad_sugerida})])
+        tocar(d)
+        db.session.commit()
+    except ErrorTraslado as e:
+        return respuesta_error_traslado(e, d)
+    return jsonify(success=True, traslado=serializar_documento(d, usuario[1], detalle=True))
 
 
 @app.route('/api/traslados/<int:id_>/acciones', methods=['POST'])
 def accion_traslado(id_):
-    """{"accion": "aprobar", "version": 3, "cantidad": 10, "motivo": "...", "comentario": "..."}"""
+    """{"accion": "aprobar", "version": 3, "cantidades": {"8": 10}, "motivo": "...", "comentario": "..."}"""
     datos = request.get_json(silent=True) or {}
     usuario = usuario_actual()
-    t = None
+    d = None
     try:
-        t = obtener_traslado(id_)
-        verificar_version(t, datos)
-        aplicar_accion(t, datos.get('accion'), datos, usuario)
+        d = obtener_documento(id_)
+        verificar_version(d, datos)
+        aplicar_accion(d, datos.get('accion'), datos, usuario)
         db.session.commit()
     except ErrorTraslado as e:
-        return respuesta_error_traslado(e, t)
-    return jsonify(success=True, traslado=serializar_traslado(t, usuario[1], con_eventos=True))
+        return respuesta_error_traslado(e, d)
+    return jsonify(success=True, traslado=serializar_documento(d, usuario[1], detalle=True))
 
 
 ACCIONES_EN_LOTE = ['enviar', 'descartar']  # aprobar y rechazar exigen revisión individual
@@ -1315,10 +1506,10 @@ def accion_lote():
     errores, procesados = [], []
     for item in items:
         try:
-            t = obtener_traslado(entero(item.get('id'), 'El id', 1))
-            verificar_version(t, item)
-            aplicar_accion(t, accion, item, usuario)
-            procesados.append(t)
+            d = obtener_documento(entero(item.get('id'), 'El id', 1))
+            verificar_version(d, item)
+            aplicar_accion(d, accion, item, usuario)
+            procesados.append(d)
         except ErrorTraslado as e:
             errores.append({'id': item.get('id'), 'error': str(e)})
     if errores:
@@ -1326,16 +1517,46 @@ def accion_lote():
         return jsonify(success=False, error=f"No se aplicó ningún cambio: {len(errores)} de {len(items)} traslados no lo permiten.",
                        errores=errores), 409
     db.session.commit()
-    return jsonify(success=True, traslados=[serializar_traslado(t, usuario[1]) for t in procesados])
+    return jsonify(success=True, traslados=[serializar_documento(d, usuario[1]) for d in procesados])
+
+
+def documento_borrador(tipo, origen, destino, usuario, ahora, horizonte=None):
+    """Borrador abierto de la ruta al que se agregan artículos nuevos; si no hay, se crea uno."""
+    d = DocumentoTraslado.query.filter_by(tipo=tipo, origen=origen, destino=destino, estado='borrador').first()
+    if d is not None:
+        return d, False
+    d = DocumentoTraslado(tipo=tipo, origen=origen, destino=destino, estado='borrador', horizonte_dias=horizonte,
+                          creado_por=usuario[0], creado_en=ahora, actualizado_en=ahora)
+    db.session.add(d)
+    db.session.flush()
+    return d, True
+
+
+def registrar_alta(d, nuevo, lineas, usuario, comentario):
+    """Evento de creación del documento o de artículos agregados a un borrador existente."""
+    articulos = [ref_articulo(l, despues={'cantidad_sugerida': l.cantidad_sugerida}) for l in lineas]
+    if nuevo:
+        registrar_evento(d, 'creado', usuario, despues={'articulos': len(lineas),
+                                                        'unidades': sum(l.cantidad_sugerida for l in lineas)},
+                         comentario=comentario, articulos=articulos)
+    else:
+        registrar_evento(d, 'articulos_agregados', usuario, d.estado, comentario=comentario, articulos=articulos)
+        tocar(d)
 
 
 @app.route('/api/traslados/generar', methods=['POST'])
 def generar_traslados():
-    """Convierte las sugerencias actuales en borradores, sin duplicar artículos que ya tienen un traslado abierto."""
+    """Convierte las sugerencias actuales en un borrador por sucursal, sin duplicar artículos con un traslado abierto.
+
+    {"dias": 15, "clases": ["A"]}: sin clases se proponen artículos de todas las clases ABC.
+    """
     datos = request.get_json(silent=True) or {}
     usuario = usuario_actual()
     try:
         dias = entero(datos.get('dias', 15), 'El horizonte', 1)
+        clases = datos.get('clases') or ['A', 'B', 'C']
+        if not isinstance(clases, list) or not set(clases) <= {'A', 'B', 'C'}:
+            raise ErrorTraslado("Las clases ABC deben ser una lista con A, B o C.")
     except ErrorTraslado as e:
         return respuesta_error_traslado(e)
 
@@ -1347,36 +1568,44 @@ def generar_traslados():
             comprometido[t.articulo_codigo] = comprometido.get(t.articulo_codigo, 0) + (
                 t.cantidad_aprobada if t.cantidad_aprobada is not None else t.cantidad_sugerida)
 
-    sugerencias = calcular_sugerencias_traslado(dias, comprometido)
-    ahora = datetime.now()
-    creados = 0
+    # El reparto del almacén entre sucursales es por artículo, así que filtrar por clase no altera las cantidades.
+    sugerencias = [s for s in calcular_sugerencias_traslado(dias, comprometido) if s['clasificacion_abc'] in clases]
+    por_destino = {}
     for s in sugerencias:
-        if (s['codigo'], ALMACEN, s['sucursal']) in ocupados:
-            continue
-        t = Traslado(
+        if (s['codigo'], ALMACEN, s['sucursal']) not in ocupados:
+            por_destino.setdefault(s['sucursal'], []).append(s)
+
+    ahora = datetime.now()
+    creados = documentos = 0
+    for destino, items in por_destino.items():
+        d, nuevo = documento_borrador('reposicion', ALMACEN, destino, usuario, ahora, dias)
+        lineas = [Traslado(
             articulo_codigo=s['codigo'], articulo_nombre=s['nombre'], clasificacion_abc=s['clasificacion_abc'],
-            tipo='reposicion', origen=ALMACEN, destino=s['sucursal'], estado='borrador',
+            tipo='reposicion', origen=ALMACEN, destino=destino, estado='borrador',
             cantidad_sugerida=s['cantidad'], stock_origen=s['disponible_almacen'], stock_destino=s['stock_sucursal'],
             cobertura_dias=s['cobertura_dias'], horizonte_dias=dias, creado_por=usuario[0],
             creado_en=ahora, actualizado_en=ahora,
-        )
-        db.session.add(t)
+        ) for s in items]
+        d.lineas.extend(lineas)
         db.session.flush()
-        registrar_evento(t, 'creado', usuario, despues={
-            'cantidad_sugerida': t.cantidad_sugerida, 'stock_origen': t.stock_origen,
-            'stock_destino': t.stock_destino, 'cobertura_dias': t.cobertura_dias,
-        }, comentario=f"Propuesta generada para cubrir {dias} días de demanda.")
-        creados += 1
+        registrar_alta(d, nuevo, lineas, usuario, f"Propuesta generada para cubrir {dias} días de demanda.")
+        creados += len(lineas)
+        documentos += 1
     db.session.commit()
     omitidos = len(sugerencias) - creados
-    return jsonify(success=True, creados=creados, omitidos=omitidos, sugerencias=len(sugerencias),
-                   message=(f"Se crearon {creados} borradores de traslado." +
+    return jsonify(success=True, creados=creados, documentos=documentos, omitidos=omitidos, sugerencias=len(sugerencias),
+                   message=(f"Se agregaron {creados} artículos ({'clase' if len(clases) == 1 else 'clases'} "
+                            f"{', '.join(sorted(clases))}) en {documentos} "
+                            f"{'documento' if documentos == 1 else 'documentos'} de traslado." +
                             (f" {omitidos} sugerencias ya tenían un traslado abierto." if omitidos else "")))
 
 
 @app.route('/api/traslados', methods=['POST'])
 def crear_retorno():
-    """Retorno de mercancía de una sucursal al almacén principal (p. ej. mercancía estancada)."""
+    """Retorno de mercancía de una sucursal al almacén principal (p. ej. mercancía estancada).
+
+    Se agrega al borrador de retorno abierto de esa sucursal o crea uno nuevo.
+    """
     datos = request.get_json(silent=True) or {}
     usuario = usuario_actual()
     try:
@@ -1399,14 +1628,14 @@ def crear_retorno():
             creado_por=usuario[0], creado_en=ahora, actualizado_en=ahora,
         )
         validar_disponible(t, cantidad)
-        db.session.add(t)
+        d, nuevo = documento_borrador('retorno', origen, ALMACEN, usuario, ahora)
+        d.lineas.append(t)
         db.session.flush()
-        registrar_evento(t, 'creado', usuario, despues={'cantidad_sugerida': cantidad, 'stock_origen': t.stock_origen},
-                         comentario=texto(datos.get('comentario')) or "Retorno de mercancía estancada al almacén.")
+        registrar_alta(d, nuevo, [t], usuario, texto(datos.get('comentario')) or "Retorno de mercancía estancada al almacén.")
         db.session.commit()
     except ErrorTraslado as e:
         return respuesta_error_traslado(e)
-    return jsonify(success=True, traslado=serializar_traslado(t, usuario[1], con_eventos=True)), 201
+    return jsonify(success=True, traslado=serializar_documento(d, usuario[1], detalle=True)), 201
 
 
 # ==================== CENTRO DE DECISIONES ====================
@@ -1441,7 +1670,7 @@ def productos_criticos(sucursal=None, dias=DIAS_COBERTURA_CRITICA):
             'codigo': codigo, 'nombre': nombres[codigo], 'sucursal': suc, 'clasificacion_abc': abc[codigo],
             'stock': stock, 'venta_diaria': round(vpd, 2), 'cobertura_dias': round(cobertura, 1),
             'stock_almacen': stock_almacen.get(codigo, 0),
-            'traslado': {'id': t.id, 'folio': folio(t), 'estado': t.estado} if t else None,
+            'traslado': {'id': t.documento_id, 'folio': folio(t.documento), 'estado': t.estado} if t else None,
         })
     items.sort(key=lambda i: (i['clasificacion_abc'], i['cobertura_dias'], i['nombre']))
     return items
@@ -1475,34 +1704,27 @@ def estado_de_los_datos():
     }
 
 
-def resumen_traslado(t):
-    return {'id': t.id, 'folio': folio(t), 'articulo_nombre': t.articulo_nombre, 'articulo_codigo': t.articulo_codigo,
-            'clasificacion_abc': t.clasificacion_abc, 'origen': t.origen, 'destino': t.destino, 'estado': t.estado,
-            'cantidad': cantidad_vigente(t), 'diferencia': (t.cantidad_recibida - t.cantidad_despachada
-                                                            if t.cantidad_recibida is not None and t.cantidad_despachada is not None else None),
-            'actualizado_en': t.actualizado_en.isoformat(timespec='seconds')}
-
-
 @app.route('/api/dashboard', methods=['GET'])
 def dashboard():
     """Indicadores, pendientes y actividad para el centro de decisiones; ?sucursal= para la vista individual."""
     sucursal = texto(request.args.get('sucursal')) or None
-    traslados = Traslado.query
+    traslados = DocumentoTraslado.query
     if sucursal:
-        traslados = traslados.filter(or_(Traslado.origen == sucursal, Traslado.destino == sucursal))
-    por_estado = dict(traslados.with_entities(Traslado.estado, func.count()).group_by(Traslado.estado).all())
+        traslados = traslados.filter(or_(DocumentoTraslado.origen == sucursal, DocumentoTraslado.destino == sucursal))
+    por_estado = dict(traslados.with_entities(DocumentoTraslado.estado, func.count()).group_by(DocumentoTraslado.estado).all())
 
     def lista(estados, orden, limite=5):
-        return [resumen_traslado(t) for t in traslados.filter(Traslado.estado.in_(estados)).order_by(*orden).limit(limite)]
+        return [resumen_documento(d) for d in traslados.filter(DocumentoTraslado.estado.in_(estados)).order_by(*orden).limit(limite)]
 
     criticos = productos_criticos(sucursal)
     capital = calcular_capital_estancado(90, sucursal)
     acciones = AccionEstancado.query.filter_by(estado='pendiente').order_by(AccionEstancado.creado_en)
 
-    actividad = db.session.query(EventoTraslado, Traslado).join(Traslado, Traslado.id == EventoTraslado.traslado_id)
+    actividad = db.session.query(EventoDocumento, DocumentoTraslado).join(
+        DocumentoTraslado, DocumentoTraslado.id == EventoDocumento.documento_id)
     if sucursal:
-        actividad = actividad.filter(or_(Traslado.origen == sucursal, Traslado.destino == sucursal))
-    actividad = actividad.order_by(EventoTraslado.fecha.desc(), EventoTraslado.id.desc()).limit(10).all()
+        actividad = actividad.filter(or_(DocumentoTraslado.origen == sucursal, DocumentoTraslado.destino == sucursal))
+    actividad = actividad.order_by(EventoDocumento.fecha.desc(), EventoDocumento.id.desc()).limit(10).all()
 
     return jsonify(
         success=True,
@@ -1518,8 +1740,8 @@ def dashboard():
         },
         pendientes={
             'por_aprobar': lista(['pendiente_aprobacion'], ORDENES['prioridad']),
-            'en_transito': lista(['despachado'], [Traslado.actualizado_en]),
-            'con_diferencias': lista(['recibido_con_diferencias'], [Traslado.actualizado_en]),
+            'en_transito': lista(['despachado'], [DocumentoTraslado.actualizado_en]),
+            'con_diferencias': lista(['recibido_con_diferencias'], [DocumentoTraslado.actualizado_en]),
         },
         criticos={'total': len(criticos), 'dias_cobertura': DIAS_COBERTURA_CRITICA, 'items': criticos[:5]},
         capital_estancado=None if capital is None else {
@@ -1528,8 +1750,7 @@ def dashboard():
             'consolidado': sucursal is None,
         },
         acciones_estancado={'pendientes': acciones.count(), 'items': [serializar_accion(a) for a in acciones.limit(5)]},
-        actividad=[{**serializar_evento(e), 'traslado': {'id': t.id, 'folio': folio(t), 'articulo_nombre': t.articulo_nombre,
-                                                        'origen': t.origen, 'destino': t.destino}} for e, t in actividad],
+        actividad=[{**serializar_evento(e), 'traslado': resumen_documento(d)} for e, d in actividad],
         importaciones=[serializar_importacion(i) for i in Importacion.query.order_by(Importacion.fecha_importacion.desc()).limit(5)],
         datos=estado_de_los_datos(),
     )
@@ -1703,6 +1924,8 @@ COLUMNAS_AGREGADAS = [
     ('ventas', 'factura_bs', 'NUMERIC(16,4)'),
     ('ventas', 'excepcion', 'VARCHAR(50)'),
     ('tasas_internas', 'tasa_bcv', 'NUMERIC(12,4)'),
+    ('traslados', 'documento_id', 'INTEGER REFERENCES traslado_documentos(id)'),
+    ('traslados', 'retirado_en', 'TIMESTAMP'),
 ]
 
 
@@ -1717,6 +1940,44 @@ def migrar_esquema():
     if db.engine.dialect.name == 'postgresql':
         with db.engine.begin() as conexion:
             conexion.execute(text('ALTER TABLE tasas_internas ALTER COLUMN tasa_paralelo DROP NOT NULL'))
+    agrupar_traslados_en_documentos()
+
+
+def agrupar_traslados_en_documentos():
+    """Traslados creados antes de los documentos (uno por artículo): se agrupan en documentos TR por ruta.
+
+    Los abiertos se agrupan por ruta y estado para poder seguir operándolos juntos; los finalizados, además, por
+    día de creación para no mezclar operaciones históricas distintas. Su historial se copia al documento.
+    """
+    sueltos = Traslado.query.filter(Traslado.documento_id.is_(None)).order_by(Traslado.id).all()
+    if not sueltos:
+        return
+    grupos = {}
+    for t in sueltos:
+        clave = (t.tipo, t.origen, t.destino, t.estado)
+        if t.estado not in ESTADOS_ABIERTOS:
+            clave += (t.creado_en.date(),)
+        grupos.setdefault(clave, []).append(t)
+    for lineas in grupos.values():
+        primera = lineas[0]
+        unicos = lambda campo: '; '.join(dict.fromkeys(getattr(l, campo) for l in lineas if getattr(l, campo))) or None
+        d = DocumentoTraslado(
+            tipo=primera.tipo, origen=primera.origen, destino=primera.destino, estado=primera.estado,
+            horizonte_dias=primera.horizonte_dias, motivo_rechazo=unicos('motivo_rechazo'),
+            observaciones=unicos('observaciones'), creado_por=primera.creado_por,
+            creado_en=min(l.creado_en for l in lineas), actualizado_en=max(l.actualizado_en for l in lineas),
+        )
+        db.session.add(d)
+        d.lineas.extend(lineas)
+        db.session.flush()
+        por_id = {l.id: l for l in lineas}
+        for e in EventoTraslado.query.filter(EventoTraslado.traslado_id.in_(por_id)).order_by(EventoTraslado.fecha, EventoTraslado.id):
+            detalle = json.loads(e.detalle) if e.detalle else {}
+            detalle['articulos'] = [ref_articulo(por_id[e.traslado_id])]
+            db.session.add(EventoDocumento(documento_id=d.id, tipo=e.tipo, estado_anterior=e.estado_anterior,
+                                           estado_nuevo=e.estado_nuevo, usuario=e.usuario, rol=e.rol, fecha=e.fecha,
+                                           detalle=json.dumps(detalle, ensure_ascii=False)))
+    db.session.commit()
 
 
 if __name__ == '__main__':

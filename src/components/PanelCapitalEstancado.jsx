@@ -595,13 +595,13 @@ export default function PanelCapitalEstancado({ sucursalInicial = '', onAbrirTra
             const t = await crearRetorno({ articulo_codigo: retorno.codigo, origen, cantidad, comentario });
             actualizarArticulo(retorno.codigo, (a) => ({
               ...a,
-              retornos: [...a.retornos, { id: t.id, folio: t.folio, origen: t.origen, estado: t.estado, cantidad: t.cantidad_sugerida }],
+              retornos: [...a.retornos, { id: t.id, folio: t.folio, origen: t.origen, estado: t.estado, cantidad }],
             }));
             setRetorno(null);
             avisar({
               tono: 'exito',
-              titulo: `${t.folio} creado como borrador`,
-              texto: 'Envíalo a aprobación desde Traslados para iniciar el retorno.',
+              titulo: t.total_articulos > 1 ? `Agregado al borrador ${t.folio}` : `${t.folio} creado como borrador`,
+              texto: 'Envía el documento a aprobación desde Traslados para iniciar el retorno.',
               accion: { texto: 'Abrir traslado', onClick: () => onAbrirTraslado(t.id) },
             });
           }}

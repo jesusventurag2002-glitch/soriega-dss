@@ -52,14 +52,22 @@ function Bloque({ titulo, icono: Icono, accion, children }) {
   );
 }
 
+const articulosDe = (t) =>
+  `${t.total_articulos} ${t.total_articulos === 1 ? 'artículo' : 'artículos'}: ${t.articulos.join(', ')}${
+    t.total_articulos > t.articulos.length ? '…' : ''
+  }`;
+
+// Un documento de traslado pendiente: ruta, artículos que lleva y total de unidades.
 function FilaTraslado({ t, onAbrir, extra }) {
   return (
     <div className="flex items-center gap-3 px-4 py-3">
       <AbcBadge clase={t.clasificacion_abc} />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-slate-900">{t.articulo_nombre}</p>
-        <p className="text-xs text-slate-500">
-          <span className="font-mono">{t.folio}</span> · {t.origen} → {t.destino} · {t.cantidad} u{extra}
+        <p className="truncate text-sm font-medium text-slate-900">
+          <span className="font-mono">{t.folio}</span> · {t.origen} → {t.destino}
+        </p>
+        <p className="truncate text-xs text-slate-500">
+          {articulosDe(t)} · {t.total_unidades} u{extra}
         </p>
       </div>
       <Boton tamano="sm" onClick={() => onAbrir(t.id)}>
@@ -339,7 +347,7 @@ export default function CentroDecisiones({ usuario, sucursal, onSucursal, onIrTr
                       key={x.id}
                       t={x}
                       onAbrir={onAbrirTraslado}
-                      extra={<span className="font-semibold text-red-700"> · diferencia {x.diferencia > 0 ? '+' : ''}{x.diferencia}</span>}
+                      extra={<span className="font-semibold text-red-700"> · {x.con_diferencias} con diferencia</span>}
                     />
                   ))}
                   {datos.pendientes.en_transito.map((x) => (
@@ -385,7 +393,9 @@ export default function CentroDecisiones({ usuario, sucursal, onSucursal, onIrTr
                       </span>{' '}
                       · <span className="font-mono text-xs">{e.traslado.folio}</span>
                     </p>
-                    <p className="truncate text-xs text-slate-500">{e.traslado.articulo_nombre}</p>
+                    <p className="truncate text-xs text-slate-500">
+                      {e.traslado.origen} → {e.traslado.destino} · {articulosDe(e.traslado)}
+                    </p>
                     <p className="text-[11px] text-slate-400">
                       {e.usuario} · {fechaHora(e.fecha)}
                     </p>

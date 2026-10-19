@@ -27,7 +27,7 @@ export const GRUPOS = [
   { id: 'en_transito', texto: 'En tránsito' },
   { id: 'por_cerrar', texto: 'Por cerrar' },
   { id: 'cerrados', texto: 'Cerrados' },
-  { id: 'rechazados', texto: 'Rechazados' },
+  { id: 'rechazados', texto: 'Descartados' },
 ];
 
 // Pestaña en la que queda cada estado, para decirle al usuario dónde encontrar el registro tras una acción.
@@ -39,12 +39,12 @@ export const GRUPO_DE_ESTADO = {
   recibido: 'Por cerrar',
   recibido_con_diferencias: 'Por cerrar',
   cerrado: 'Cerrados',
-  rechazado: 'Rechazados',
-  descartado: 'Rechazados',
+  rechazado: 'Descartados',
+  descartado: 'Descartados',
 };
 
 export const SIGUIENTE_PASO = {
-  borrador: 'Revisa la cantidad y envíalo a aprobación.',
+  borrador: 'Revisa los artículos y sus cantidades, y envía el documento a aprobación.',
   pendiente_aprobacion: 'Un gerente debe aprobarlo o rechazarlo.',
   aprobado: 'Registra el despacho cuando la mercancía salga del origen.',
   despachado: 'Registra la recepción cuando llegue al destino.',
@@ -66,8 +66,10 @@ export const MENSAJE_ACCION = {
 };
 
 export const EVENTOS = {
-  creado: 'Propuesta creada',
-  cantidad_modificada: 'Cantidad modificada',
+  creado: 'Documento creado',
+  articulos_agregados: 'Artículos agregados',
+  articulo_retirado: 'Artículo retirado',
+  cantidad_modificada: 'Cantidades modificadas',
   observaciones: 'Observaciones actualizadas',
   enviado_aprobacion: 'Enviado a aprobación',
   aprobado: 'Aprobado',
@@ -89,9 +91,16 @@ export const CAMPOS = {
   stock_destino: 'Stock en destino',
   cobertura_dias: 'Cobertura del destino (días)',
   observaciones: 'Observaciones',
+  articulos: 'Artículos',
+  unidades: 'Unidades',
+  unidades_aprobadas: 'Unidades aprobadas',
+  unidades_despachadas: 'Unidades despachadas',
+  unidades_recibidas: 'Unidades recibidas',
 };
 
-// Cantidad relevante en cada etapa del ciclo.
+export const folioDe = (id) => `TR-${String(id).padStart(5, '0')}`;
+
+// Cantidad relevante en cada etapa del ciclo (por artículo).
 export function cantidadVigente(t) {
   if (t.cantidad_recibida != null) return { valor: t.cantidad_recibida, etiqueta: 'recibida' };
   if (t.cantidad_despachada != null) return { valor: t.cantidad_despachada, etiqueta: 'despachada' };

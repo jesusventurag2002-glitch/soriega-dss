@@ -8,9 +8,9 @@ const datosBase = {
   sucursal: null,
   traslados: { borradores: 4, por_aprobar: 2, por_despachar: 0, en_transito: 1, con_diferencias: 0, por_cerrar: 0 },
   pendientes: {
-    por_aprobar: [{ id: 3, folio: 'TR-00003', articulo_nombre: 'Aceite 1L', articulo_codigo: '1', clasificacion_abc: 'A',
-      origen: 'Almacén Principal', destino: 'Barcelona', estado: 'pendiente_aprobacion', cantidad: 10, diferencia: null,
-      actualizado_en: '2026-10-17T10:00:00' }],
+    por_aprobar: [{ id: 3, folio: 'TR-00003', tipo: 'reposicion', clasificacion_abc: 'A', origen: 'Almacén Principal',
+      destino: 'Barcelona', estado: 'pendiente_aprobacion', total_articulos: 1, total_unidades: 10, abc: { A: 1, B: 0, C: 0 },
+      con_diferencias: 0, articulos: ['Aceite 1L'], actualizado_en: '2026-10-17T10:00:00' }],
     en_transito: [],
     con_diferencias: [],
   },

@@ -8,24 +8,31 @@ import PanelLateral from '../ui/PanelLateral.jsx';
 import { useAvisos } from '../ui/Avisos.jsx';
 import TablaTraslados from './TablaTraslados.jsx';
 import DetalleTraslado from './DetalleTraslado.jsx';
-import { GRUPOS, GRUPO_DE_ESTADO, MENSAJE_ACCION, SIGUIENTE_PASO } from './estados.js';
-import { accionTraslado, editarTraslado, generarTraslados, listarTraslados, loteTraslados } from '../../services/api.js';
+import { GRUPOS, GRUPO_DE_ESTADO, MENSAJE_ACCION, SIGUIENTE_PASO, folioDe } from './estados.js';
+import { accionTraslado, editarTraslado, generarTraslados, listarTraslados, loteTraslados, retirarArticulo } from '../../services/api.js';
 
 export const FILTROS_INICIALES = { grupo: 'activos', q: '', sucursal: '', origen: '', destino: '', abc: '', orden: 'prioridad', pagina: 1 };
 
 const HORIZONTES = [7, 15, 30];
+// Clases ABC que se proponen al generar (independiente del filtro de la bandeja).
+const CLASES_A_GENERAR = [
+  { id: 'ABC', texto: 'Todas las clases' },
+  { id: 'A', texto: 'Solo clase A' },
+  { id: 'AB', texto: 'Clases A y B' },
+  { id: 'B', texto: 'Solo clase B' },
+  { id: 'C', texto: 'Solo clase C' },
+];
 const ORDENES = [
   { id: 'prioridad', texto: 'Prioridad (ABC y cobertura)' },
   { id: 'reciente', texto: 'Actualizados recientemente' },
   { id: 'estado', texto: 'Estado' },
-  { id: 'cantidad', texto: 'Cantidad (mayor primero)' },
-  { id: 'producto', texto: 'Producto (A–Z)' },
+  { id: 'cantidad', texto: 'Unidades (mayor primero)' },
+  { id: 'ruta', texto: 'Destino (A–Z)' },
 ];
 const VERBO = {
   enviar: 'enviar', descartar: 'descartar', aprobar: 'aprobar', rechazar: 'rechazar',
   despachar: 'despachar', recibir: 'registrar la recepción de', cerrar: 'cerrar',
 };
-const folioDe = (id) => `TR-${String(id).padStart(5, '0')}`;
 const claseSelect =
   'rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-900';
 
@@ -37,6 +44,7 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
   const [procesando, setProcesando] = useState({});
   const [seleccion, setSeleccion] = useState(() => new Set());
   const [dias, setDias] = useState(15);
+  const [clasesGenerar, setClasesGenerar] = useState(filtros.abc || 'ABC');
   const [generando, setGenerando] = useState(false);
   const [busqueda, setBusqueda] = useState(filtros.q);
   const [dialogo, setDialogo] = useState(null);
@@ -47,6 +55,9 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
     (cambios) => onFiltros((f) => ({ ...f, ...cambios, pagina: cambios.pagina ?? 1 })),
     [onFiltros]
   );
+
+  // Filtrar la bandeja por una clase ABC también la elige para generar: es lo que el usuario espera ver propuesto.
+  useEffect(() => setClasesGenerar(filtros.abc || 'ABC'), [filtros.abc]);
 
   // La búsqueda se aplica al dejar de escribir.
   useEffect(() => {
@@ -138,12 +149,31 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
     [avisar]
   );
 
-  // Acciones rápidas de la tabla; rechazar siempre pide el motivo.
+  const retirar = useCallback(
+    async (t, linea, comentario) => {
+      marcarProcesando(t.id, true);
+      try {
+        const nuevo = await retirarArticulo(t.id, linea.id, t.version, comentario);
+        reemplazar(nuevo);
+        avisar({ tono: 'exito', titulo: `${linea.articulo_nombre} quitado de ${nuevo.folio}`, texto: `Quedan ${nuevo.total_articulos} artículos en el documento.` });
+        return nuevo;
+      } catch (e) {
+        if (e.cuerpo?.traslado) reemplazar(e.cuerpo.traslado);
+        avisar({ tono: 'error', titulo: `No se pudo quitar el artículo de ${t.folio}`, texto: e.message });
+        throw e;
+      } finally {
+        marcarProcesando(t.id, false);
+      }
+    },
+    [avisar]
+  );
+
+  // Acciones rápidas de la tabla sobre el documento completo; rechazar siempre pide el motivo.
   const accionRapida = (t, accion) => {
     if (accion === 'rechazar') {
       setDialogo({
         titulo: `Rechazar ${t.folio}`,
-        texto: `${t.articulo_nombre} · ${t.cantidad_sugerida} u de ${t.origen} a ${t.destino}.`,
+        texto: `${t.total_articulos} artículos · ${t.total_unidades} u de ${t.origen} a ${t.destino}.`,
         textoConfirmar: 'Rechazar',
         variante: 'peligro',
         campo: { etiqueta: 'Motivo del rechazo', requerido: true, placeholder: 'Ej.: hay una compra en camino' },
@@ -157,10 +187,10 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
   const generar = async () => {
     setGenerando(true);
     try {
-      const r = await generarTraslados(dias);
+      const r = await generarTraslados(dias, [...clasesGenerar]);
       avisar({
         tono: r.creados ? 'exito' : 'info',
-        titulo: r.creados ? `${r.creados} propuestas nuevas` : 'No hay propuestas nuevas',
+        titulo: r.creados ? `${r.creados} artículos propuestos en ${r.documentos} ${r.documentos === 1 ? 'traslado' : 'traslados'}` : 'No hay propuestas nuevas',
         texto: r.message,
         accion: r.creados ? { texto: 'Ver borradores', onClick: () => cambiarFiltros({ grupo: 'borradores' }) } : undefined,
       });
@@ -183,9 +213,9 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
             {seleccionados.map((t) => (
               <li key={t.id} className="flex justify-between gap-2">
                 <span className="truncate">
-                  <span className="font-mono">{t.folio}</span> · {t.articulo_nombre} → {t.destino}
+                  <span className="font-mono">{t.folio}</span> → {t.destino} · {t.total_articulos} artículos
                 </span>
-                <span className="shrink-0 font-semibold tabular-nums">{t.cantidad_sugerida} u</span>
+                <span className="shrink-0 font-semibold tabular-nums">{t.total_unidades} u</span>
               </li>
             ))}
           </ul>
@@ -220,7 +250,7 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
       <Encabezado
         icono={ArrowLeftRight}
         titulo="Traslados"
-        subtitulo="Propuestas entre el almacén y las sucursales, y su seguimiento hasta la recepción."
+        subtitulo="Un documento por ruta con todos sus artículos: se aprueba, despacha y recibe de una sola vez."
       >
         <label className="sr-only" htmlFor="horizonte">
           Días de demanda a cubrir
@@ -229,6 +259,16 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
           {HORIZONTES.map((d) => (
             <option key={d} value={d}>
               Cubrir {d} días
+            </option>
+          ))}
+        </select>
+        <label className="sr-only" htmlFor="clases-generar">
+          Clases ABC a proponer
+        </label>
+        <select id="clases-generar" value={clasesGenerar} onChange={(e) => setClasesGenerar(e.target.value)} className={claseSelect}>
+          {CLASES_A_GENERAR.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.texto}
             </option>
           ))}
         </select>
@@ -262,13 +302,13 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
 
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto_auto_auto]">
         <label className="relative sm:col-span-2 lg:col-span-1">
-          <span className="sr-only">Buscar por producto, código o folio</span>
+          <span className="sr-only">Buscar por folio, producto o código</span>
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <input
             type="search"
             value={busqueda}
             onChange={(e) => setBusqueda(e.target.value)}
-            placeholder="Buscar producto, código o folio (TR-…)"
+            placeholder="Buscar folio (TR-…), producto o código"
             className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
           />
         </label>
@@ -393,7 +433,7 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
 
           <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600">
             <span>
-              {datos.total} {datos.total === 1 ? 'traslado' : 'traslados'} · página {datos.pagina} de {datos.paginas}
+              {datos.total} {datos.total === 1 ? 'documento' : 'documentos'} · página {datos.pagina} de {datos.paginas}
             </span>
             {datos.paginas > 1 && (
               <div className="flex gap-2">
@@ -412,7 +452,8 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
       <PanelLateral
         abierto={detalleId != null}
         titulo={detalleId != null ? `Traslado ${folioDe(detalleId)}` : ''}
-        subtitulo="Detalle, acciones e historial"
+        subtitulo="Artículos, acciones e historial"
+        ancho="sm:max-w-2xl"
         onCerrar={() => onDetalle(null)}
       >
         {detalleId != null && (
@@ -421,6 +462,7 @@ export default function TrasladosModulo({ filtros, onFiltros, detalleId, onDetal
             version={detalleEnLista?.version}
             ejecutar={ejecutar}
             editar={editar}
+            retirar={retirar}
             procesando={!!procesando[detalleId]}
           />
         )}
