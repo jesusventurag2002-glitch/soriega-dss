@@ -831,33 +831,44 @@ def analisis_ventas():
         *del_mes, Venta.factura_bs.isnot(None), or_(TasaInterna.tasa_paralelo.is_(None), TasaInterna.tasa_paralelo <= 0)).scalar()
 
     sucursal_col = func.coalesce(Venta.sucursal, 'Sin asignar').label('sucursal')
+    sin_costo = or_(Venta.costo_real_usd.is_(None), Venta.costo_real_usd == 0)
     filas = ventas_con_tasa(
-        sucursal_col, Venta.grupo_venta, func.sum(VENTA_USD)
+        sucursal_col, Venta.grupo_venta, func.sum(VENTA_USD), func.sum(func.coalesce(Venta.costo_real_usd, 0)),
+        func.sum(case((sin_costo, VENTA_USD), else_=0)),
     ).filter(*del_mes, sin_excluidas).group_by(sucursal_col, Venta.grupo_venta).all()
 
     total_por_grupo = {}
-    for _, grupo, total in filas:
+    for _, grupo, total, _, _ in filas:
         total_por_grupo[grupo] = total_por_grupo.get(grupo, 0) + float(total or 0)
     principales = sorted(total_por_grupo, key=total_por_grupo.get, reverse=True)[:GRUPOS_PRINCIPALES]
 
-    por_sucursal = {}
-    for sucursal, grupo, total in filas:
-        clave = grupo if grupo in principales else 'OTROS'
-        grupos = por_sucursal.setdefault(sucursal, {})
-        grupos[clave] = grupos.get(clave, 0) + float(total or 0)
+    # Por sucursal: los grupos principales con el resto en OTROS (para el gráfico) y todos los grupos (para la tabla).
+    por_sucursal, todos = {}, {}
+    for sucursal, grupo, total, costo, venta_sin_costo in filas:
+        valores = (float(total or 0), float(costo or 0), float(venta_sin_costo or 0))
+        for destino, clave in ((por_sucursal, grupo if grupo in principales else 'OTROS'), (todos, grupo)):
+            actual = destino.setdefault(sucursal, {}).get(clave, (0, 0, 0))
+            destino[sucursal][clave] = tuple(a + b for a, b in zip(actual, valores))
 
-    sucursales = sorted(
-        (
-            {
-                'sucursal': sucursal,
-                'total': round(sum(grupos.values()), 2),
-                # Orden fijo (principales y luego OTROS) para que cada grupo conserve su color y posición.
-                'grupos': [{'grupo': g, 'total': round(grupos[g], 2)} for g in principales + ['OTROS'] if g in grupos],
-            }
-            for sucursal, grupos in por_sucursal.items()
-        ),
-        key=lambda s: s['total'], reverse=True,
-    )
+    def rentabilidad(nombre, total, costo, venta_sin_costo):
+        """Utilidad = ventas - costo (ambos con IVA, como en la hoja ANAL); margen sobre ventas."""
+        utilidad = total - costo
+        return {'grupo': nombre, 'total': round(total, 2), 'costo': round(costo, 2), 'utilidad': round(utilidad, 2),
+                'margen': round(utilidad / total * 100, 1) if total else None, 'ventas_sin_costo': round(venta_sin_costo, 2)}
+
+    def resumen(sucursal):
+        grupos, completos = por_sucursal[sucursal], todos[sucursal]
+        total, costo, venta_sin_costo = (sum(v[i] for v in grupos.values()) for i in range(3))
+        datos = rentabilidad(None, total, costo, venta_sin_costo)
+        del datos['grupo']
+        return {
+            'sucursal': sucursal, **datos,
+            # Orden fijo (principales y luego OTROS) para que cada grupo conserve su color y posición.
+            'grupos': [rentabilidad(g, *grupos[g]) for g in principales + ['OTROS'] if g in grupos],
+            'todos_los_grupos': sorted((rentabilidad(g, *v) for g, v in completos.items()), key=lambda g: g['total'], reverse=True),
+        }
+
+    sucursales = sorted((resumen(s) for s in por_sucursal), key=lambda s: s['total'], reverse=True)
 
     desde = corte - timedelta(days=6)
     diarios = dict(ventas_con_tasa(
@@ -875,6 +886,9 @@ def analisis_ventas():
         ano=ano,
         meses_disponibles=[{'mes': m, 'ano': a} for a, m in meses_disponibles],
         total_mes=round(sum(s['total'] for s in sucursales), 2),
+        costo_mes=round(sum(s['costo'] for s in sucursales), 2),
+        utilidad_mes=round(sum(s['utilidad'] for s in sucursales), 2),
+        ventas_sin_costo_mes=round(sum(s['ventas_sin_costo'] for s in sucursales), 2),
         total_bruto=round(float(total_bruto or 0), 2),
         # Días del mes con ventas cuyo USD se calculó con FACTOR por no haber tasa interna cargada.
         dias_sin_tasa_interna=int(dias_sin_tasa or 0),

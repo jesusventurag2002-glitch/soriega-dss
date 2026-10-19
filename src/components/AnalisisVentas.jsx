@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Bar, BarChart, Cell, LabelList, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from 'recharts';
-import { ArrowLeft, BarChart3, Store, XCircle, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, BarChart3, ListTree, Store, XCircle, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { guardarExcepciones, obtenerAnalisisVentas } from '../services/api.js';
 import AdministrarExcepciones from './AdministrarExcepciones.jsx';
 import { capitalizar, fechaLocal, nombreMes, usd, usdCompacto } from '../utils/formato.js';
@@ -38,6 +38,112 @@ function Tarjeta({ titulo, subtitulo, children }) {
       {subtitulo && <p className="text-xs text-slate-500">{subtitulo}</p>}
       <div className="mt-4">{children}</div>
     </section>
+  );
+}
+
+const porcentaje = (n) => (n == null ? '—' : `${n.toLocaleString('es-VE', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`);
+
+// Un margen negativo (se vendió por debajo del costo) se destaca en rojo.
+const claseUtilidad = (n) => (n < 0 ? 'text-red-700' : 'text-slate-900');
+
+function Indicador({ etiqueta, valor, detalle, tono = 'text-slate-900' }) {
+  return (
+    <div className="rounded-xl bg-white p-4 ring-1 ring-slate-200">
+      <p className="text-xs font-medium text-slate-500">{etiqueta}</p>
+      <p className={`mt-1 text-2xl font-bold tabular-nums tracking-tight ${tono}`}>{valor}</p>
+      {detalle && <p className="mt-0.5 text-xs text-slate-500">{detalle}</p>}
+    </div>
+  );
+}
+
+// Grupos cuyas ventas no traen costo en el reporte: su utilidad aparece mayor de lo real.
+function AvisoSinCosto({ g }) {
+  if (!g.ventas_sin_costo) return null;
+  return (
+    <span
+      title={`${usd(g.ventas_sin_costo, 0)} vendidos sin costo registrado: la utilidad está sobreestimada`}
+      className="ml-1 inline-flex cursor-help align-[-2px] text-amber-600"
+      aria-label="Ventas sin costo registrado"
+    >
+      <AlertTriangle className="h-3.5 w-3.5" />
+    </span>
+  );
+}
+
+const ORDENES_GRUPOS = [
+  { id: 'total', texto: 'Ventas' },
+  { id: 'utilidad', texto: 'Utilidad' },
+  { id: 'margen', texto: 'Margen' },
+];
+
+// Tabla completa de grupos de la sucursal, sin agrupar en "Otros".
+function TodosLosGrupos({ sucursal, onCerrar }) {
+  const [orden, setOrden] = useState('total');
+  const grupos = [...sucursal.todos_los_grupos].sort((a, b) => (b[orden] ?? -Infinity) - (a[orden] ?? -Infinity));
+  return (
+    <Tarjeta
+      titulo={`Todos los grupos · Sucursal ${sucursal.sucursal}`}
+      subtitulo={`${grupos.length} grupos de producto con ventas en el mes`}
+    >
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div role="group" aria-label="Ordenar por" className="flex gap-1">
+          {ORDENES_GRUPOS.map((o) => (
+            <button
+              key={o.id}
+              onClick={() => setOrden(o.id)}
+              aria-pressed={orden === o.id}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                orden === o.id ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              {o.texto}
+            </button>
+          ))}
+        </div>
+        <button onClick={onCerrar} className="text-sm font-medium text-slate-500 hover:text-slate-900">
+          Ocultar
+        </button>
+      </div>
+      <div className="max-h-[32rem] overflow-auto">
+        <table className="w-full min-w-[34rem] text-sm">
+          <thead className="sticky top-0 bg-white">
+            <tr className="text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+              <th className="pb-2">Grupo</th>
+              <th className="pb-2 text-right">Ventas</th>
+              <th className="pb-2 text-right">Costo</th>
+              <th className="pb-2 text-right">Utilidad</th>
+              <th className="pb-2 text-right">Margen</th>
+              <th className="pb-2 text-right">Aporte</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 tabular-nums">
+            {grupos.map((g) => (
+              <tr key={g.grupo}>
+                <td className="py-2 pr-2 text-slate-700">{capitalizar(g.grupo)}</td>
+                <td className="py-2 text-right font-medium text-slate-900">{usd(g.total, 0)}</td>
+                <td className="py-2 text-right text-slate-500">{usd(g.costo, 0)}</td>
+                <td className={`py-2 text-right font-medium ${claseUtilidad(g.utilidad)}`}>
+                  {usd(g.utilidad, 0)}
+                  <AvisoSinCosto g={g} />
+                </td>
+                <td className={`py-2 text-right ${g.margen < 0 ? 'text-red-700' : 'text-slate-700'}`}>{porcentaje(g.margen)}</td>
+                <td className="py-2 text-right text-slate-500">{porcentaje(sucursal.total ? (g.total / sucursal.total) * 100 : null)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="border-t-2 border-slate-200 font-semibold tabular-nums">
+              <td className="pt-2 text-slate-900">Total</td>
+              <td className="pt-2 text-right text-slate-900">{usd(sucursal.total, 0)}</td>
+              <td className="pt-2 text-right text-slate-500">{usd(sucursal.costo, 0)}</td>
+              <td className={`pt-2 text-right ${claseUtilidad(sucursal.utilidad)}`}>{usd(sucursal.utilidad, 0)}</td>
+              <td className="pt-2 text-right text-slate-700">{porcentaje(sucursal.margen)}</td>
+              <td className="pt-2 text-right text-slate-500">100%</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </Tarjeta>
   );
 }
 
@@ -91,6 +197,7 @@ export default function AnalisisVentas({ onVolver }) {
   const [menuExcepciones, setMenuExcepciones] = useState(false);
   const [guardando, setGuardando] = useState(false);
   const [seleccion, setSeleccion] = useState(null);
+  const [verTodos, setVerTodos] = useState(false);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
 
@@ -152,10 +259,10 @@ export default function AnalisisVentas({ onVolver }) {
               <h1 className="text-2xl font-semibold text-slate-900">Análisis de ventas</h1>
               <p className="text-sm text-slate-500">
                 {datos
-                  ? `${usd(datos.total_mes, 0)} en ${nombreMes(datos.mes, datos.ano)} · ${datos.sucursales.length} ${
+                  ? `${usd(datos.total_mes, 0)} vendidos y ${usd(datos.utilidad_mes, 0)} de utilidad en ${nombreMes(datos.mes, datos.ano)} · ${datos.sucursales.length} ${
                       datos.sucursales.length === 1 ? 'sucursal' : 'sucursales'
                     } · datos al ${fechaLocal(datos.fecha_corte).toLocaleDateString('es-VE')}`
-                  : 'Facturación real en USD por sucursal y grupo de producto'}
+                  : 'Facturación real y utilidad en USD por sucursal y grupo de producto'}
               </p>
             </div>
           </div>
@@ -231,6 +338,26 @@ export default function AnalisisVentas({ onVolver }) {
               {datos.dias_sin_tasa_interna} {datos.dias_sin_tasa_interna === 1 ? 'día' : 'días'} de este mes sin tasa
               interna cargada: sus ventas se convirtieron con la tasa BCV del sistema. El administrador del sistema
               debe cargar la hoja TASA en Carga de datos.
+            </p>
+          )}
+
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <Indicador etiqueta="Ventas del mes" valor={usd(datos.total_mes, 0)} detalle="USD a tasa interna" />
+            <Indicador etiqueta="Costo de lo vendido" valor={usd(datos.costo_mes, 0)} />
+            <Indicador etiqueta="Utilidad" valor={usd(datos.utilidad_mes, 0)} tono={claseUtilidad(datos.utilidad_mes)} detalle="Ventas − costo" />
+            <Indicador
+              etiqueta="Margen"
+              valor={porcentaje(datos.total_mes ? (datos.utilidad_mes / datos.total_mes) * 100 : null)}
+              detalle="Utilidad sobre ventas"
+            />
+          </div>
+
+          {datos.ventas_sin_costo_mes > 0 && (
+            <p className="flex items-start gap-2 rounded-lg bg-amber-50 p-3 text-xs text-amber-800 ring-1 ring-amber-200">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {usd(datos.ventas_sin_costo_mes, 0)} de ventas del mes no traen costo en el reporte
+              ({porcentaje((datos.ventas_sin_costo_mes / datos.total_mes) * 100)} del total): en esas ventas la utilidad aparece
+              igual al precio, así que la utilidad real es menor. Los grupos afectados se marcan con el mismo icono.
             </p>
           )}
 
@@ -318,7 +445,8 @@ export default function AnalisisVentas({ onVolver }) {
                         <tr className="text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                           <th className="pb-2">Grupo</th>
                           <th className="pb-2 text-right">Ventas</th>
-                          <th className="pb-2 text-right">Aporte</th>
+                          <th className="pb-2 text-right">Utilidad</th>
+                          <th className="pb-2 text-right">Margen</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 tabular-nums">
@@ -330,17 +458,41 @@ export default function AnalisisVentas({ onVolver }) {
                                 {etiquetaGrupo(g.grupo)}
                               </span>
                             </td>
-                            <td className="py-2 text-right font-medium text-slate-900">{usd(g.total, 0)}</td>
-                            <td className="py-2 text-right text-slate-500">{((g.total / sucursal.total) * 100).toFixed(1)}%</td>
+                            <td className="py-2 text-right font-medium text-slate-900">
+                              {usd(g.total, 0)}
+                              <span className="block text-[11px] font-normal text-slate-400">{porcentaje((g.total / sucursal.total) * 100)}</span>
+                            </td>
+                            <td className={`py-2 text-right font-medium ${claseUtilidad(g.utilidad)}`}>
+                              {usd(g.utilidad, 0)}
+                              <AvisoSinCosto g={g} />
+                            </td>
+                            <td className={`py-2 text-right ${g.margen < 0 ? 'text-red-700' : 'text-slate-500'}`}>{porcentaje(g.margen)}</td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
+                    <p className="text-xs text-slate-500">
+                      Utilidad de la sucursal:{' '}
+                      <strong className={claseUtilidad(sucursal.utilidad)}>{usd(sucursal.utilidad, 0)}</strong> · margen{' '}
+                      {porcentaje(sucursal.margen)}
+                    </p>
+                    <button
+                      onClick={() => setVerTodos((v) => !v)}
+                      aria-expanded={verTodos}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-sm font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-100"
+                    >
+                      <ListTree className="h-4 w-4" />
+                      {verTodos ? 'Ocultar grupos' : `Ver todos los grupos (${sucursal.todos_los_grupos.length})`}
+                    </button>
+                  </div>
                 </Tarjeta>
               </div>
             </div>
           )}
+
+          {sucursal && verTodos && <TodosLosGrupos sucursal={sucursal} onCerrar={() => setVerTodos(false)} />}
         </div>
       )}
     </div>
