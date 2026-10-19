@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Bell, Clock, AlertTriangle, Truck, Flame, AlertOctagon, ChevronRight } from 'lucide-react';
+import { Bell, Clock, AlertTriangle, Truck, Flame, AlertOctagon, ChevronRight, ClipboardX } from 'lucide-react';
 import { obtenerDashboard } from '../services/api.js';
+import { useAuth } from '../auth/AuthContext.jsx';
 
 // Alertas operativas calculadas en el backend; cada una lleva a los registros que la componen.
-function construirAlertas(d) {
+// Solo se incluyen las que llevan a una vista que el usuario puede abrir.
+function construirAlertas(d, puede) {
   const t = d.traslados;
+  const discrepancias = puede('revisar_discrepancias') && d.discrepancias_pendientes > 0 && {
+    id: 'discrepancias', icono: ClipboardX, color: 'text-red-700 bg-red-50',
+    titulo: `${d.discrepancias_pendientes} ${d.discrepancias_pendientes === 1 ? 'discrepancia reportada' : 'discrepancias reportadas'} por el piso de venta`,
+    destino: { vista: 'discrepancias' },
+  };
+  if (!puede('traslados')) return [discrepancias].filter(Boolean);
   return [
+    discrepancias,
     t.por_aprobar > 0 && {
       id: 'aprobar', icono: Clock, color: 'text-amber-700 bg-amber-50',
       titulo: `${t.por_aprobar} ${t.por_aprobar === 1 ? 'traslado espera' : 'traslados esperan'} aprobación`,
@@ -35,15 +44,16 @@ function construirAlertas(d) {
 }
 
 export default function AlertBell({ vista, onIr }) {
+  const { puede } = useAuth();
   const [alertas, setAlertas] = useState(null);
   const [abierto, setAbierto] = useState(false);
   const ref = useRef(null);
 
   const cargar = useCallback(() => {
     obtenerDashboard()
-      .then((d) => setAlertas(construirAlertas(d)))
+      .then((d) => setAlertas(construirAlertas(d, puede)))
       .catch(() => setAlertas(null)); // sin backend no se muestran alertas inventadas
-  }, []);
+  }, [puede]);
 
   // Se actualiza al cambiar de módulo y al abrir el panel.
   useEffect(() => {

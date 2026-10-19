@@ -153,7 +153,7 @@ export default function TasasDelDia() {
             </div>
 
             <p className="text-[11px] text-slate-400">
-              BCV: factor del sistema en el reporte de ventas. Interna: hoja TASA (Configuración inicial). Ambas
+              BCV: factor del sistema en el reporte de ventas. Interna: hoja TASA (Carga de datos). Ambas
               llegarán del sistema administrativo con la conexión ODBC.
             </p>
             {fecha && (

@@ -73,8 +73,16 @@ export const registrarAccionEstancado = (datos) =>
   pedir('/api/estancado/acciones', { metodo: 'POST', cuerpo: datos }).then((d) => d.accion);
 export const cerrarAccionEstancado = (id, estado, resultado) =>
   pedir(`/api/estancado/acciones/${id}`, { metodo: 'PATCH', cuerpo: { estado, resultado } }).then((d) => d.accion);
-export const listarAccionesEstancado = (estado) =>
-  pedir('/api/estancado/acciones', { params: { estado } }).then((d) => d.acciones);
+export const listarAccionesEstancado = (estado, tipo) =>
+  pedir('/api/estancado/acciones', { params: { estado, tipo } }).then((d) => d.acciones);
+
+// ---- Piso de venta ----
+export const consultarStock = (q) => pedir('/api/inventario/stock', { params: { q } }).then((d) => d.items);
+export const listarDiscrepancias = (filtros) => pedir('/api/discrepancias', { params: filtros }).then((d) => d.discrepancias);
+export const reportarDiscrepancia = (datos) =>
+  pedir('/api/discrepancias', { metodo: 'POST', cuerpo: datos }).then((d) => d.discrepancia);
+export const revisarDiscrepancia = (id, resolucion) =>
+  pedir(`/api/discrepancias/${id}`, { metodo: 'PATCH', cuerpo: { resolucion } }).then((d) => d.discrepancia);
 
 // ---- Centro de decisiones ----
 export const obtenerDashboard = (sucursal) => pedir('/api/dashboard', { params: { sucursal } });

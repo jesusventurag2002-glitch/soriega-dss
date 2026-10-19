@@ -113,7 +113,7 @@ function EstadoDatos({ datos, sucursal, onConfigurar }) {
         <Aviso
           tono="advertencia"
           titulo="Datos incompletos"
-          accion={<Boton tamano="sm" onClick={onConfigurar}>Cargar archivos</Boton>}
+          accion={onConfigurar && <Boton tamano="sm" onClick={onConfigurar}>Cargar archivos</Boton>}
         >
           {incompletas.map((x) => `${x.s}: falta ${x.falta.join(' y ')}`).join(' · ')}. Los indicadores que dependen de esa información no la
           incluyen.
@@ -150,7 +150,7 @@ function EstadoDatos({ datos, sucursal, onConfigurar }) {
   );
 }
 
-export default function CentroDecisiones({ usuario, sucursal, onSucursal, onIrTraslados, onAbrirTraslado, onIr }) {
+export default function CentroDecisiones({ usuario, sucursal, onSucursal, onIrTraslados, onAbrirTraslado, onIr, puedeCargar = false }) {
   const [datos, setDatos] = useState(null);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
@@ -232,18 +232,24 @@ export default function CentroDecisiones({ usuario, sucursal, onSucursal, onIrTr
 
       {sinDatos && (
         <EstadoVacio icono={Database} titulo="Aún no hay datos cargados">
-          Carga los inventarios y las ventas en Configuración inicial para calcular indicadores y alertas.
-          <div className="mt-3">
-            <Boton variante="primario" onClick={() => onIr('configuracion')}>
-              Ir a Configuración inicial
-            </Boton>
-          </div>
+          {puedeCargar ? (
+            <>
+              Carga los inventarios y las ventas en Carga de datos para calcular indicadores y alertas.
+              <div className="mt-3">
+                <Boton variante="primario" onClick={() => onIr('configuracion')}>
+                  Ir a Carga de datos
+                </Boton>
+              </div>
+            </>
+          ) : (
+            'Pide al administrador del sistema que cargue los inventarios y las ventas para calcular indicadores y alertas.'
+          )}
         </EstadoVacio>
       )}
 
       {datos && !sinDatos && (
         <div className={`space-y-6 transition-opacity ${cargando ? 'opacity-60' : ''}`}>
-          <EstadoDatos datos={datos.datos} sucursal={sucursal} onConfigurar={() => onIr('configuracion')} />
+          <EstadoDatos datos={datos.datos} sucursal={sucursal} onConfigurar={puedeCargar ? () => onIr('configuracion') : null} />
 
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
             <Indicador

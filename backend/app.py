@@ -45,6 +45,7 @@ class Inventario(db.Model):
     origen_inventario = db.Column(db.String(10)) # 'INV' (sucursales) o 'INVAL' (almacén principal)
     existencia = db.Column(db.Integer, default=0)
     sucursal = db.Column(db.String(100))  # solo para 'INV'; el almacén principal no tiene sucursal
+    precio_usd = db.Column(db.Numeric(12, 4))  # precio de venta en USD sin IVA en esa ubicación
 
 class TasaInterna(db.Model):
     __tablename__ = 'tasas_internas'
@@ -153,6 +154,23 @@ class EventoTraslado(db.Model):
     rol = db.Column(db.String(30))
     fecha = db.Column(db.DateTime, nullable=False, index=True)
     detalle = db.Column(db.Text)  # JSON: {"antes": {...}, "despues": {...}, "comentario": "..."}
+
+class Discrepancia(db.Model):
+    """Alerta del piso de venta: lo contado físicamente en la tienda no coincide con el inventario del sistema."""
+    __tablename__ = 'discrepancias'
+    id = db.Column(db.Integer, primary_key=True)
+    articulo_codigo = db.Column(db.String(50), nullable=False, index=True)
+    articulo_nombre = db.Column(db.String(255), nullable=False)
+    sucursal = db.Column(db.String(100), nullable=False, index=True)
+    existencia_sistema = db.Column(db.Integer, nullable=False)  # foto del inventario cargado al reportar
+    existencia_contada = db.Column(db.Integer, nullable=False)
+    comentario = db.Column(db.Text)
+    estado = db.Column(db.String(20), nullable=False, default='pendiente', index=True)  # pendiente | revisada
+    resolucion = db.Column(db.Text)
+    creado_por = db.Column(db.String(100))
+    creado_en = db.Column(db.DateTime, nullable=False)
+    revisado_por = db.Column(db.String(100))
+    revisado_en = db.Column(db.DateTime)
 
 class AccionEstancado(db.Model):
     """Seguimiento de decisiones sobre mercancía estancada (promoción o devolución a proveedor)."""
@@ -267,6 +285,15 @@ def es_articulo_excluido(row):
     grupo = texto(row.get('nombredegr', row.get('nombredegrupo'))).upper()
     subgrupo = texto(row.get('nombre_sub')).upper()
     return grupo in GRUPOS_EXCLUIDOS or subgrupo in SUBGRUPOS_EXCLUIDOS
+
+
+def precio_venta_usd(row, origen):
+    """Precio de venta en USD sin IVA. Las sucursales lo traen en PRECIO1EX (PRECIO1 está en Bs); el almacén
+    principal trabaja en USD y lo trae en PRECIO1, con PRECIO1EX vacío."""
+    precio = numero(row.get('precio1ex'))
+    if precio <= 0 and origen == 'INVAL':
+        precio = numero(row.get('precio1'))
+    return round(precio, 4) if precio > 0 else None
 
 
 def detectar_excepcion(row):
@@ -448,7 +475,7 @@ def cargar_inventario(df, origen, sucursal=None):
 
     # Precarga en memoria para evitar una consulta por fila.
     articulos = {a.codigo: a for a in Articulo.query.all()}
-    existencias = {}  # si un código se repite en el archivo, prevalece la última fila
+    existencias, precios = {}, {}  # si un código se repite en el archivo, prevalece la última fila
     nuevos, actualizados = 0, 0
     # Incluye los de uso interno ya guardados por cargas anteriores, para limpiarlos.
     codigos_internos = {c for c, a in articulos.items() if (a.nombredegrupo or '').upper() in GRUPOS_EXCLUIDOS}
@@ -484,9 +511,10 @@ def cargar_inventario(df, origen, sucursal=None):
             actualizados += 1
 
         existencias[codigo_art] = existencia_actual
+        precios[codigo_art] = precio_venta_usd(row, origen)
 
     db.session.add_all(
-        Inventario(articulo_codigo=c, origen_inventario=origen, existencia=e, sucursal=sucursal)
+        Inventario(articulo_codigo=c, origen_inventario=origen, existencia=e, sucursal=sucursal, precio_usd=precios[c])
         for c, e in existencias.items()
     )
 
@@ -1719,6 +1747,9 @@ def dashboard():
     criticos = productos_criticos(sucursal)
     capital = calcular_capital_estancado(90, sucursal)
     acciones = AccionEstancado.query.filter_by(estado='pendiente').order_by(AccionEstancado.creado_en)
+    discrepancias = Discrepancia.query.filter_by(estado='pendiente')
+    if sucursal:
+        discrepancias = discrepancias.filter_by(sucursal=sucursal)
 
     actividad = db.session.query(EventoDocumento, DocumentoTraslado).join(
         DocumentoTraslado, DocumentoTraslado.id == EventoDocumento.documento_id)
@@ -1750,6 +1781,7 @@ def dashboard():
             'consolidado': sucursal is None,
         },
         acciones_estancado={'pendientes': acciones.count(), 'items': [serializar_accion(a) for a in acciones.limit(5)]},
+        discrepancias_pendientes=discrepancias.count(),
         actividad=[{**serializar_evento(e), 'traslado': resumen_documento(d)} for e, d in actividad],
         importaciones=[serializar_importacion(i) for i in Importacion.query.order_by(Importacion.fecha_importacion.desc()).limit(5)],
         datos=estado_de_los_datos(),
@@ -1793,8 +1825,9 @@ def serializar_accion(a):
 @app.route('/api/estancado/acciones', methods=['GET'])
 def listar_acciones_estancado():
     q = AccionEstancado.query
-    if request.args.get('estado'):
-        q = q.filter(AccionEstancado.estado == request.args['estado'])
+    for campo in ('estado', 'tipo'):
+        if request.args.get(campo):
+            q = q.filter(getattr(AccionEstancado, campo) == request.args[campo])
     return jsonify(success=True, acciones=[serializar_accion(a) for a in q.order_by(AccionEstancado.creado_en.desc()).limit(200)])
 
 
@@ -1839,6 +1872,112 @@ def cerrar_accion_estancado(id_):
     accion.cerrado_por, accion.cerrado_en = usuario_actual()[0], datetime.now()
     db.session.commit()
     return jsonify(success=True, accion=serializar_accion(accion))
+
+
+# ==================== PISO DE VENTA ====================
+def existencias_por_ubicacion(codigos):
+    """{codigo: {ubicación: (existencia, precio USD sin IVA)}} del almacén principal y cada sucursal cargada."""
+    resultado = {}
+    for codigo, origen, sucursal, total, precio in db.session.query(
+        Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal, func.sum(Inventario.existencia),
+        func.max(Inventario.precio_usd),
+    ).filter(Inventario.articulo_codigo.in_(codigos)).group_by(
+        Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal):
+        ubicacion = ALMACEN if origen == 'INVAL' else (sucursal or 'Sin asignar')
+        existencia, _ = resultado.setdefault(codigo, {}).get(ubicacion, (0, None))
+        resultado[codigo][ubicacion] = (existencia + int(total or 0), float(precio) if precio else None)
+    return resultado
+
+
+@app.route('/api/inventario/stock', methods=['GET'])
+def consultar_stock():
+    """Existencias de artículos concretos por código o nombre (?q=), para consultar desde la tienda."""
+    termino = texto(request.args.get('q'))
+    if len(termino) < 2:
+        return jsonify(success=False, error="Escribe al menos 2 caracteres del código o el nombre."), 400
+    patron = f'%{termino.lower()}%'
+    articulos = Articulo.query.filter(or_(
+        func.lower(Articulo.codigo).like(patron), func.lower(Articulo.nombre).like(patron),
+    )).order_by((Articulo.codigo == termino).desc(), Articulo.nombre).limit(20).all()
+    codigos = [a.codigo for a in articulos]
+    existencias = existencias_por_ubicacion(codigos)
+    abc = clasificacion_abc()
+    pendientes = {(d.articulo_codigo, d.sucursal) for d in Discrepancia.query.filter(
+        Discrepancia.articulo_codigo.in_(codigos), Discrepancia.estado == 'pendiente')}
+    return jsonify(success=True, items=[{
+        'codigo': a.codigo, 'nombre': a.nombre, 'grupo': a.nombredegrupo, 'clasificacion_abc': abc.get(a.codigo),
+        'existencias': [{'ubicacion': u, 'existencia': n, 'precio_usd': precio, 'discrepancia_pendiente': (a.codigo, u) in pendientes}
+                        for u, (n, precio) in sorted(existencias.get(a.codigo, {}).items(), key=lambda x: (x[0] != ALMACEN, x[0]))],
+    } for a in articulos])
+
+
+def serializar_discrepancia(d):
+    return {
+        'id': d.id, 'articulo_codigo': d.articulo_codigo, 'articulo_nombre': d.articulo_nombre, 'sucursal': d.sucursal,
+        'existencia_sistema': d.existencia_sistema, 'existencia_contada': d.existencia_contada,
+        'diferencia': d.existencia_contada - d.existencia_sistema, 'comentario': d.comentario, 'estado': d.estado,
+        'resolucion': d.resolucion, 'creado_por': d.creado_por, 'creado_en': d.creado_en.isoformat(timespec='seconds'),
+        'revisado_por': d.revisado_por, 'revisado_en': d.revisado_en.isoformat(timespec='seconds') if d.revisado_en else None,
+    }
+
+
+@app.route('/api/discrepancias', methods=['GET'])
+def listar_discrepancias():
+    q = Discrepancia.query
+    for campo in ('estado', 'sucursal'):
+        if request.args.get(campo):
+            q = q.filter(getattr(Discrepancia, campo) == request.args[campo])
+    return jsonify(success=True, discrepancias=[serializar_discrepancia(d) for d in
+                                                q.order_by(Discrepancia.creado_en.desc()).limit(200)])
+
+
+@app.route('/api/discrepancias', methods=['POST'])
+def reportar_discrepancia():
+    """{"articulo_codigo", "sucursal", "existencia_contada", "comentario"}; la existencia del sistema sale del inventario."""
+    datos = request.get_json(silent=True) or {}
+    usuario = usuario_actual()
+    try:
+        codigo, sucursal = texto(datos.get('articulo_codigo')), texto(datos.get('sucursal'))
+        art = db.session.get(Articulo, codigo) if codigo else None
+        if art is None:
+            raise ErrorTraslado("El artículo no existe.")
+        if not sucursal:
+            raise ErrorTraslado("Indica la ubicación donde se contó la mercancía.")
+        contada = entero(datos.get('existencia_contada'), 'La cantidad contada', 0)
+        sistema = stock_en(sucursal, codigo)
+        if contada == sistema:
+            raise ErrorTraslado(f"Lo contado coincide con el sistema ({sistema} u): no hay discrepancia que reportar.")
+        comentario = texto(datos.get('comentario'))
+        if len(comentario) < 3:
+            raise ErrorTraslado("Describe brevemente la discrepancia.")
+        if Discrepancia.query.filter_by(articulo_codigo=codigo, sucursal=sucursal, estado='pendiente').first():
+            raise ErrorTraslado("Ya hay una discrepancia pendiente de revisión para este artículo en esa ubicación.", 409)
+    except ErrorTraslado as e:
+        return jsonify(success=False, error=str(e)), e.status
+    d = Discrepancia(articulo_codigo=codigo, articulo_nombre=art.nombre, sucursal=sucursal, existencia_sistema=sistema,
+                     existencia_contada=contada, comentario=comentario, estado='pendiente', creado_por=usuario[0],
+                     creado_en=datetime.now())
+    db.session.add(d)
+    db.session.commit()
+    return jsonify(success=True, discrepancia=serializar_discrepancia(d)), 201
+
+
+@app.route('/api/discrepancias/<int:id_>', methods=['PATCH'])
+def revisar_discrepancia(id_):
+    """{"resolucion": "..."}: la marca como revisada; solo una vez."""
+    datos = request.get_json(silent=True) or {}
+    d = db.session.get(Discrepancia, id_)
+    if d is None:
+        return jsonify(success=False, error="La discrepancia no existe."), 404
+    if d.estado != 'pendiente':
+        return jsonify(success=False, error="La discrepancia ya fue revisada.", discrepancia=serializar_discrepancia(d)), 409
+    resolucion = texto(datos.get('resolucion'))
+    if len(resolucion) < 3:
+        return jsonify(success=False, error="Indica qué se hizo con la discrepancia."), 400
+    d.estado, d.resolucion = 'revisada', resolucion
+    d.revisado_por, d.revisado_en = usuario_actual()[0], datetime.now()
+    db.session.commit()
+    return jsonify(success=True, discrepancia=serializar_discrepancia(d))
 
 
 @app.route('/api/tasas', methods=['GET'])
@@ -1926,6 +2065,7 @@ COLUMNAS_AGREGADAS = [
     ('tasas_internas', 'tasa_bcv', 'NUMERIC(12,4)'),
     ('traslados', 'documento_id', 'INTEGER REFERENCES traslado_documentos(id)'),
     ('traslados', 'retirado_en', 'TIMESTAMP'),
+    ('inventarios', 'precio_usd', 'NUMERIC(12,4)'),
 ]
 
 

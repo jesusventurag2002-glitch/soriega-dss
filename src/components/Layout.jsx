@@ -1,20 +1,18 @@
-import { Boxes, LogOut, LayoutDashboard, Database, AlertOctagon, BarChart3, ArrowLeftRight } from 'lucide-react';
+import { Boxes, LogOut } from 'lucide-react';
 import AlertBell from './AlertBell.jsx';
 import TasasDelDia from './TasasDelDia.jsx';
+import { useAuth } from '../auth/AuthContext.jsx';
+import { vistasPermitidas } from '../auth/roles.js';
 
-const VISTAS = [
-  { id: 'inicio', texto: 'Inicio', icono: LayoutDashboard },
-  { id: 'traslados', texto: 'Traslados', icono: ArrowLeftRight },
-  { id: 'ventas', texto: 'Ventas', icono: BarChart3 },
-  { id: 'estancado', texto: 'Capital estancado', icono: AlertOctagon },
-  { id: 'configuracion', texto: 'Configuración inicial', icono: Database },
-];
-
-export default function Layout({ usuario, vista, onCambiarVista, onIr, onLogout, children }) {
+export default function Layout({ vista, onCambiarVista, onIr, children }) {
+  const { usuario, etiquetaRol, logout, puede } = useAuth();
   const iniciales = usuario.nombre
     .split(' ')
     .map((p) => p[0])
-    .join('');
+    .join('')
+    .slice(0, 2);
+  // El menú solo contiene lo que el rol puede abrir: una opción sin permiso no se muestra deshabilitada, no existe.
+  const vistas = vistasPermitidas(usuario);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -32,7 +30,7 @@ export default function Layout({ usuario, vista, onCambiarVista, onIr, onLogout,
 
           <div className="flex items-center gap-2 sm:gap-4">
             <TasasDelDia />
-            <AlertBell vista={vista} onIr={onIr} />
+            {(puede('traslados') || puede('revisar_discrepancias')) && <AlertBell vista={vista} onIr={onIr} />}
 
             <div className="flex items-center gap-3 pl-2 sm:pl-4 border-l border-slate-200">
               <div className="h-9 w-9 rounded-full bg-slate-200 text-slate-700 text-sm font-semibold flex items-center justify-center">
@@ -40,11 +38,15 @@ export default function Layout({ usuario, vista, onCambiarVista, onIr, onLogout,
               </div>
               <div className="hidden md:block leading-tight">
                 <p className="text-sm font-medium text-slate-900">{usuario.nombre}</p>
-                <p className="text-xs text-slate-500">{usuario.etiqueta}</p>
+                <p className="text-xs text-slate-500">
+                  {etiquetaRol}
+                  {usuario.sucursal && ` · ${usuario.sucursal}`}
+                </p>
               </div>
               <button
-                onClick={onLogout}
+                onClick={logout}
                 title="Cerrar sesión"
+                aria-label="Cerrar sesión"
                 className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900 transition"
               >
                 <LogOut className="h-5 w-5" />
@@ -53,8 +55,8 @@ export default function Layout({ usuario, vista, onCambiarVista, onIr, onLogout,
           </div>
         </div>
 
-        <nav className="mx-auto max-w-7xl px-4 sm:px-6 flex gap-1 overflow-x-auto">
-          {VISTAS.map(({ id, texto, icono: Icono }) => (
+        <nav aria-label="Menú principal" className="mx-auto max-w-7xl px-4 sm:px-6 flex gap-1 overflow-x-auto">
+          {vistas.map(({ id, texto, icono: Icono }) => (
             <button
               key={id}
               onClick={() => onCambiarVista(id)}

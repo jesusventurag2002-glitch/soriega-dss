@@ -49,8 +49,8 @@ function ComparativoSucursales({ sucursales, seleccion, onSeleccionar, totalMes 
         <p className="text-sm text-slate-500">{sucursales[0].sucursal}</p>
         <p className="mt-1 text-3xl font-bold tracking-tight text-slate-900">{usd(sucursales[0].total, 0)}</p>
         <p className="mt-4 rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
-          Solo hay ventas cargadas de una sucursal. Sube el historial de ventas de las demás en Configuración inicial
-          para compararlas aquí.
+          Solo hay ventas cargadas de una sucursal. Cuando se cargue el historial de ventas de las demás
+          (Carga de datos, administrador del sistema) podrás compararlas aquí.
         </p>
       </Tarjeta>
     );
@@ -229,8 +229,8 @@ export default function AnalisisVentas({ onVolver }) {
           {datos.dias_sin_tasa_interna > 0 && (
             <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800 ring-1 ring-amber-200">
               {datos.dias_sin_tasa_interna} {datos.dias_sin_tasa_interna === 1 ? 'día' : 'días'} de este mes sin tasa
-              interna cargada: sus ventas se convirtieron con la tasa BCV del sistema. Carga la hoja TASA en
-              Configuración inicial.
+              interna cargada: sus ventas se convirtieron con la tasa BCV del sistema. El administrador del sistema
+              debe cargar la hoja TASA en Carga de datos.
             </p>
           )}
 

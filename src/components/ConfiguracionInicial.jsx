@@ -112,7 +112,7 @@ export default function ConfiguracionInicial() {
 
   return (
     <div className="space-y-6">
-      <Encabezado icono={Database} titulo="Configuración inicial" subtitulo="Carga de datos base desde archivos del sistema administrativo" />
+      <Encabezado icono={Database} titulo="Carga de datos" subtitulo="Carga de datos base desde archivos del sistema administrativo" />
 
       <Aviso tono="advertencia" titulo="Módulo de carga manual activo (Fase de Mockup).">
         Esta vista será deshabilitada cuando se establezca la conexión ODBC a los servidores de producción.

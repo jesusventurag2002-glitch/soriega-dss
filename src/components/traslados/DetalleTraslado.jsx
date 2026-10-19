@@ -5,9 +5,11 @@ import Boton from '../ui/Boton.jsx';
 import Aviso from '../ui/Aviso.jsx';
 import Dialogo from '../ui/Dialogo.jsx';
 import { obtenerTraslado } from '../../services/api.js';
+import { ROLES } from '../../auth/roles.js';
 import { CAMPOS, EVENTOS, SIGUIENTE_PASO, fechaHora } from './estados.js';
 
-const ROL = { gerente: 'Gerente', analista: 'Analista' };
+// Etiqueta del rol de quien hizo cada cambio; incluye el rol «analista» de registros anteriores.
+const ROL = { analista: 'Analista', ...Object.fromEntries(Object.entries(ROLES).map(([id, r]) => [id, r.etiqueta])) };
 
 // Cantidad que se captura por artículo en cada etapa: de qué valor parte, contra qué se compara y sus límites.
 const CAPTURAS = {
