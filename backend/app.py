@@ -1,44 +1,34 @@
-import io
-import json
+"""Composición de la aplicación: crea Flask, instancia los adaptadores e inyecta los casos de uso en las rutas.
+
+Capas: dominio/ (reglas puras) <- aplicacion/ (casos de uso) -> puertos/ (interfaces) <- adaptadores/ (Flask,
+SQLAlchemy, pandas). Este archivo es el único que conoce todas las piezas.
+"""
 import os
-import re
-import unicodedata
-from datetime import datetime, timedelta
-from urllib.parse import unquote
 
-import pandas as pd
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from flask_cors import CORS
-from sqlalchemy import and_, case, func, inspect, or_, text, true
 
-from adaptadores.entrada.http import estado_http, usuario_actual
 from adaptadores.entrada.demanda import crear_blueprint as blueprint_demanda
-from adaptadores.entrada.ventas import crear_blueprint as blueprint_ventas
-from adaptadores.entrada.operacion import crear_blueprint as blueprint_operacion
 from adaptadores.entrada.importacion import crear_blueprint as blueprint_importacion
-from adaptadores.entrada.traslados import crear_blueprint as blueprint_traslados, resumen_documento, serializar_evento
-from adaptadores.salida.migraciones import agrupar_traslados_en_documentos, migrar_esquema  # noqa: F401 (pruebas)
+from adaptadores.entrada.operacion import crear_blueprint as blueprint_operacion
+from adaptadores.entrada.traslados import crear_blueprint as blueprint_traslados
+from adaptadores.entrada.ventas import crear_blueprint as blueprint_ventas
 from adaptadores.salida.lector_pandas import LectorPandas
+from adaptadores.salida.migraciones import migrar_esquema
 from adaptadores.salida.repo_cargas import RepositorioCargasSQL
-from adaptadores.salida.repo_operacion import RepositorioAccionesSQL, RepositorioTableroSQL, RepositorioTiendaSQL
 from adaptadores.salida.repo_demanda import RepositorioDemandaSQL
 from adaptadores.salida.repo_inventario import InventarioSQL
+from adaptadores.salida.repo_operacion import RepositorioAccionesSQL, RepositorioTableroSQL, RepositorioTiendaSQL
+from adaptadores.salida.repo_traslados import RepositorioTrasladosSQL
 from adaptadores.salida.repo_ventas import RepositorioVentasSQL
-from adaptadores.salida.repo_traslados import ORDENES, RepositorioTrasladosSQL
 from aplicacion.demanda import CasosDemanda
 from aplicacion.importacion import CasosImportacion
 from aplicacion.operacion import CasosEstancado, CasosTablero, CasosTienda
 from aplicacion.traslados import CasosTraslados
 from aplicacion.ventas import CasosVentas
-from dominio.comun import entero, numero, texto
-from dominio.demanda import DIAS_COBERTURA_CRITICA
-from dominio.errores import Conflicto, ErrorDominio
-from dominio.traslados import ALMACEN, ESTADOS_ABIERTOS, cantidad_vigente, folio
-from dominio.ventas import EXCEPCIONES
-from adaptadores.salida.modelos import (
-    AccionEstancado, Articulo, ConfigExcepcion, Discrepancia, DocumentoTraslado, EventoDocumento, EventoTraslado,
-    Importacion, Inventario, TasaInterna, Traslado, Venta, db,
-)
+# Las pruebas de integración preparan datos con los modelos y la migración a través de este módulo.
+from adaptadores.salida.migraciones import agrupar_traslados_en_documentos  # noqa: F401
+from adaptadores.salida.modelos import Articulo, EventoTraslado, Inventario, Traslado, Venta, db  # noqa: F401
 
 app = Flask(__name__)
 
@@ -69,19 +59,22 @@ def archivo_muy_grande(_):
     return jsonify(success=False, error="El archivo supera el límite de 25 MB."), 413
 
 
+# Adaptadores de salida (no guardan estado: usan la sesión de Flask-SQLAlchemy de cada petición).
 inventario = InventarioSQL()
-repo_traslados = RepositorioTrasladosSQL()
-casos_demanda = CasosDemanda(RepositorioDemandaSQL(), repo_traslados)
+traslados = RepositorioTrasladosSQL()
+acciones = RepositorioAccionesSQL()
+
+# Casos de uso y rutas.
+demanda = CasosDemanda(RepositorioDemandaSQL(), traslados)
 app.register_blueprint(blueprint_traslados(
-    CasosTraslados(repo_traslados, inventario, casos_demanda.sugerencias_traslado, casos_demanda.clasificacion_abc)))
-app.register_blueprint(blueprint_demanda(casos_demanda))
+    CasosTraslados(traslados, inventario, demanda.sugerencias_traslado, demanda.clasificacion_abc)))
+app.register_blueprint(blueprint_demanda(demanda))
 app.register_blueprint(blueprint_ventas(CasosVentas(RepositorioVentasSQL())))
 app.register_blueprint(blueprint_importacion(CasosImportacion(RepositorioCargasSQL(), LectorPandas())))
-acciones = RepositorioAccionesSQL()
 app.register_blueprint(blueprint_operacion(
-    CasosEstancado(acciones, casos_demanda, repo_traslados, inventario),
-    CasosTienda(RepositorioTiendaSQL(), inventario, casos_demanda),
-    CasosTablero(RepositorioTableroSQL(), casos_demanda, acciones, inventario),
+    CasosEstancado(acciones, demanda, traslados, inventario),
+    CasosTienda(RepositorioTiendaSQL(), inventario, demanda),
+    CasosTablero(RepositorioTableroSQL(), demanda, acciones, inventario),
 ))
 
 
