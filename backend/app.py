@@ -13,17 +13,21 @@ from sqlalchemy import and_, case, func, inspect, or_, text, true
 
 from adaptadores.entrada.http import estado_http, usuario_actual
 from adaptadores.entrada.demanda import crear_blueprint as blueprint_demanda
+from adaptadores.entrada.ventas import crear_blueprint as blueprint_ventas
 from adaptadores.entrada.traslados import crear_blueprint as blueprint_traslados, resumen_documento, serializar_evento
 from adaptadores.salida.migraciones import agrupar_traslados_en_documentos, migrar_esquema  # noqa: F401 (pruebas)
 from adaptadores.salida.repo_demanda import RepositorioDemandaSQL
 from adaptadores.salida.repo_inventario import InventarioSQL
+from adaptadores.salida.repo_ventas import RepositorioVentasSQL
 from adaptadores.salida.repo_traslados import ORDENES, RepositorioTrasladosSQL
 from aplicacion.demanda import CasosDemanda
 from aplicacion.traslados import CasosTraslados
-from dominio.comun import entero
+from aplicacion.ventas import CasosVentas
+from dominio.comun import entero, numero, parsear_fecha
 from dominio.demanda import DIAS_COBERTURA_CRITICA
 from dominio.errores import Conflicto, ErrorDominio
 from dominio.traslados import ALMACEN, ESTADOS_ABIERTOS, cantidad_vigente, folio
+from dominio.ventas import EXCEPCIONES
 from adaptadores.salida.modelos import (
     AccionEstancado, Articulo, ConfigExcepcion, Discrepancia, DocumentoTraslado, EventoDocumento, EventoTraslado,
     Importacion, Inventario, TasaInterna, Traslado, Venta, db,
@@ -47,24 +51,6 @@ CORS(app, resources={r'/api/*': {'origins': ORIGENES_FRONTEND}})
 # ==================== UTILIDADES DE PARSEO ====================
 TIPOS_REPORTE = {'ventas', 'inv_fisico', 'inv_inval', 'tasas'}
 
-# Excepciones de la hoja ANAL: ventas que no son facturación comercial (reposiciones entre tiendas,
-# mermas, consumo interno y servicios). Se guardan marcadas y cada consulta decide si excluirlas.
-# Se comparan por igualdad exacta (como SUMIFS) contra el campo indicado del reporte.
-EXCEPCIONES = [
-    {'id': 'plastinet_valencia', 'nombre': 'Plastinet Valencia', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'PLASTINET VALENCIA'},
-    {'id': 'reposicion_maturin', 'nombre': 'Reposición Maturín', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'REPOSICION MATURIN'},
-    {'id': 'reposicion_margarita', 'nombre': 'Reposición Margarita', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'REPOSICION MARGARITA'},
-    {'id': 'saul_noriega', 'nombre': 'Saúl Noriega', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'SAUL NORIEGA'},
-    {'id': 'brotcars', 'nombre': 'Brotcars', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'BROTCARS'},
-    {'id': 'mercancia_danada', 'nombre': 'Mercancía dañada', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'MERCANCIA DANADA'},
-    {'id': 'productos_oficina', 'nombre': 'Productos para oficina', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'PRODUCTOS PARA OFICINA'},
-    {'id': 'servicio_brotcarservice', 'nombre': 'Brotcarservice', 'categoria': 'servicio', 'campo': 'nombredegr', 'valor': 'BROTCARSERVICE'},
-    {'id': 'servicio_balloonazo', 'nombre': 'Arreglos Balloonazo (mano de obra)', 'categoria': 'servicio', 'campo': 'nombre', 'valor': 'ARREGLOS BALLOONAZO MANO DE OBRA'},
-    # No figura en ANAL; el backend la excluía antes, por eso se ofrece desmarcada.
-    {'id': 'mercancia_extraviada', 'nombre': 'Mercancía extraviada', 'categoria': 'cliente', 'campo': 'nombrecli', 'valor': 'MERCANCIA EXTRAVIADA', 'por_defecto': False},
-]
-EXCEPCIONES_POR_DEFECTO = [e['id'] for e in EXCEPCIONES if e.get('por_defecto', True)]
-
 # Artículos de uso interno (no comerciales): se ignoran en toda la lógica de negocio.
 GRUPOS_EXCLUIDOS = ["MARKETING"]
 SUBGRUPOS_EXCLUIDOS = ["EQUIPOS DE OFICINA"]
@@ -87,33 +73,9 @@ def texto(valor, defecto=''):
     return str(valor).strip() or defecto
 
 
-def numero(valor, defecto=0.0):
-    try:
-        n = float(str(valor).replace(',', '.'))
-    except (TypeError, ValueError):
-        return defecto
-    return defecto if pd.isna(n) else n
-
-
 def codigo_articulo(valor):
     # Excel suele entregar los códigos como float (12345.0)
     return texto(valor).split('.')[0].strip()
-
-
-def parsear_fecha(valor):
-    if valor is None or pd.isna(valor):
-        return None
-    if isinstance(valor, datetime):
-        return valor.date()
-    partes = str(valor).split()
-    if not partes:
-        return None
-    for formato in ('%Y-%m-%d', '%d/%m/%Y'):
-        try:
-            return datetime.strptime(partes[0], formato).date()
-        except ValueError:
-            continue
-    return None
 
 
 MAX_FILAS_TITULO = 5  # filas de título que puede traer el reporte antes de los encabezados
@@ -437,194 +399,6 @@ def carga_inicial():
         return jsonify(success=False, error=f"Error procesando el archivo: {e}"), 500
 
 
-@app.route('/api/resumen', methods=['GET'])
-def resumen():
-    hoy = datetime.today()
-    mes = request.args.get('mes', default=hoy.month, type=int)
-    ano = request.args.get('ano', default=hoy.year, type=int)
-    filtro = (
-        func.extract('month', Venta.fecha_emision) == mes,
-        func.extract('year', Venta.fecha_emision) == ano,
-        filtro_excepciones(excepciones_a_excluir()),
-    )
-
-    total_factura, total_costo = ventas_con_tasa(
-        func.coalesce(func.sum(VENTA_USD), 0),
-        func.coalesce(func.sum(Venta.costo_real_usd), 0),
-    ).filter(*filtro).one()
-
-    ventas_por_grupo = ventas_con_tasa(
-        Venta.grupo_venta, func.sum(VENTA_USD)
-    ).filter(*filtro).group_by(Venta.grupo_venta).order_by(func.sum(VENTA_USD).desc()).all()
-
-    return jsonify(
-        success=True,
-        mes=mes,
-        ano=ano,
-        total_factura=round(float(total_factura), 2),
-        total_costo=round(float(total_costo), 2),
-        total_utilidad=round(float(total_factura) - float(total_costo), 2),
-        ventas_por_grupo=[
-            {'grupo': str(g).strip().upper() if g else "SIN GRUPO", 'total': round(float(t), 2)}
-            for g, t in ventas_por_grupo
-        ],
-    )
-
-
-# La demanda (ABC, traslados, última venta) solo considera ventas comerciales: reposiciones entre tiendas,
-# mermas, consumo interno y servicios no son rotación de mercancía.
-ES_VENTA_COMERCIAL = Venta.excepcion.is_(None)
-
-# Facturación en USD como la hoja VENTA: Bs / tasa interna del día. Sin tasa interna para esa fecha
-# (o si el archivo traía 'fact'), se usa el valor guardado al cargar.
-VENTA_USD = case(
-    (and_(Venta.factura_bs.isnot(None), TasaInterna.tasa_paralelo > 0), Venta.factura_bs / TasaInterna.tasa_paralelo),
-    else_=Venta.factura_real_usd,
-)
-
-
-def ventas_con_tasa(*columnas):
-    return db.session.query(*columnas).select_from(Venta).outerjoin(TasaInterna, TasaInterna.fecha == Venta.fecha_emision)
-
-
-GRUPOS_PRINCIPALES = 5  # el resto se agrupa en "OTROS" para que el desglose sea legible
-
-
-def excepciones_configuradas():
-    """Ids excluidos según "Administrar excepciones" (por defecto, los de la hoja ANAL)."""
-    guardadas = {c.id: c.excluida for c in ConfigExcepcion.query}
-    return [e['id'] for e in EXCEPCIONES if guardadas.get(e['id'], e.get('por_defecto', True))]
-
-
-def excepciones_a_excluir():
-    """?excluir=id1,id2 (vacío = facturación bruta) para una consulta puntual; sin el parámetro, la configuración guardada."""
-    if 'excluir' not in request.args:
-        return excepciones_configuradas()
-    validas = {e['id'] for e in EXCEPCIONES}
-    return [x for x in request.args['excluir'].split(',') if x in validas]
-
-
-def filtro_excepciones(excluir):
-    return or_(Venta.excepcion.is_(None), Venta.excepcion.notin_(excluir)) if excluir else true()
-
-
-@app.route('/api/excepciones', methods=['PUT'])
-def guardar_excepciones():
-    """{"excluir": [ids]} guarda qué excepciones se excluyen; {"restablecer": true} vuelve a las de la hoja ANAL."""
-    datos = request.get_json(silent=True) or {}
-    validas = {e['id'] for e in EXCEPCIONES}
-    if datos.get('restablecer'):
-        ConfigExcepcion.query.delete()
-    else:
-        excluir = datos.get('excluir')
-        if not isinstance(excluir, list) or not set(excluir) <= validas:
-            return jsonify(success=False, error="'excluir' debe ser una lista de ids de excepción válidos."), 400
-        for id_ in validas:
-            config = db.session.get(ConfigExcepcion, id_) or ConfigExcepcion(id=id_)
-            config.excluida = id_ in excluir
-            db.session.add(config)
-    db.session.commit()
-    return jsonify(success=True, excluidas=excepciones_configuradas())
-
-
-@app.route('/api/ventas/analisis', methods=['GET'])
-def analisis_ventas():
-    """Ventas (USD a tasa interna) de un mes por sucursal y grupo, más la tendencia de los últimos 7 días."""
-    corte = db.session.query(func.max(Venta.fecha_emision)).scalar()
-    if corte is None:
-        return jsonify(success=False, error="No hay historial de ventas cargado."), 400
-    # Por defecto, el mes de la última venta registrada (los datos son una foto fija).
-    mes = request.args.get('mes', default=corte.month, type=int)
-    ano = request.args.get('ano', default=corte.year, type=int)
-    excluir = excepciones_a_excluir()
-    sin_excluidas = filtro_excepciones(excluir)
-
-    anio_col, mes_col = func.extract('year', Venta.fecha_emision), func.extract('month', Venta.fecha_emision)
-    meses_disponibles = sorted(
-        {(int(a), int(m)) for a, m in db.session.query(anio_col, mes_col).distinct()}, reverse=True
-    )
-    del_mes = (anio_col == ano, mes_col == mes)
-
-    # Monto de cada excepción en el mes, para que se vea cuánto mueve marcarla o desmarcarla.
-    montos_excepcion = dict(ventas_con_tasa(Venta.excepcion, func.sum(VENTA_USD)).filter(
-        *del_mes, Venta.excepcion.isnot(None)).group_by(Venta.excepcion).all())
-    total_bruto = ventas_con_tasa(func.coalesce(func.sum(VENTA_USD), 0)).filter(*del_mes).scalar()
-    dias_sin_tasa = ventas_con_tasa(func.count(func.distinct(Venta.fecha_emision))).filter(
-        *del_mes, Venta.factura_bs.isnot(None), or_(TasaInterna.tasa_paralelo.is_(None), TasaInterna.tasa_paralelo <= 0)).scalar()
-
-    sucursal_col = func.coalesce(Venta.sucursal, 'Sin asignar').label('sucursal')
-    sin_costo = or_(Venta.costo_real_usd.is_(None), Venta.costo_real_usd == 0)
-    filas = ventas_con_tasa(
-        sucursal_col, Venta.grupo_venta, func.sum(VENTA_USD), func.sum(func.coalesce(Venta.costo_real_usd, 0)),
-        func.sum(case((sin_costo, VENTA_USD), else_=0)),
-    ).filter(*del_mes, sin_excluidas).group_by(sucursal_col, Venta.grupo_venta).all()
-
-    total_por_grupo = {}
-    for _, grupo, total, _, _ in filas:
-        total_por_grupo[grupo] = total_por_grupo.get(grupo, 0) + float(total or 0)
-    principales = sorted(total_por_grupo, key=total_por_grupo.get, reverse=True)[:GRUPOS_PRINCIPALES]
-
-    # Por sucursal: los grupos principales con el resto en OTROS (para el gráfico) y todos los grupos (para la tabla).
-    por_sucursal, todos = {}, {}
-    for sucursal, grupo, total, costo, venta_sin_costo in filas:
-        valores = (float(total or 0), float(costo or 0), float(venta_sin_costo or 0))
-        for destino, clave in ((por_sucursal, grupo if grupo in principales else 'OTROS'), (todos, grupo)):
-            actual = destino.setdefault(sucursal, {}).get(clave, (0, 0, 0))
-            destino[sucursal][clave] = tuple(a + b for a, b in zip(actual, valores))
-
-    def rentabilidad(nombre, total, costo, venta_sin_costo):
-        """Utilidad = ventas - costo (ambos con IVA, como en la hoja ANAL); margen sobre ventas."""
-        utilidad = total - costo
-        return {'grupo': nombre, 'total': round(total, 2), 'costo': round(costo, 2), 'utilidad': round(utilidad, 2),
-                'margen': round(utilidad / total * 100, 1) if total else None, 'ventas_sin_costo': round(venta_sin_costo, 2)}
-
-    def resumen(sucursal):
-        grupos, completos = por_sucursal[sucursal], todos[sucursal]
-        total, costo, venta_sin_costo = (sum(v[i] for v in grupos.values()) for i in range(3))
-        datos = rentabilidad(None, total, costo, venta_sin_costo)
-        del datos['grupo']
-        return {
-            'sucursal': sucursal, **datos,
-            # Orden fijo (principales y luego OTROS) para que cada grupo conserve su color y posición.
-            'grupos': [rentabilidad(g, *grupos[g]) for g in principales + ['OTROS'] if g in grupos],
-            'todos_los_grupos': sorted((rentabilidad(g, *v) for g, v in completos.items()), key=lambda g: g['total'], reverse=True),
-        }
-
-    sucursales = sorted((resumen(s) for s in por_sucursal), key=lambda s: s['total'], reverse=True)
-
-    desde = corte - timedelta(days=6)
-    diarios = dict(ventas_con_tasa(
-        Venta.fecha_emision, func.sum(VENTA_USD)
-    ).filter(Venta.fecha_emision >= desde, sin_excluidas).group_by(Venta.fecha_emision).all())
-    ultimos_7_dias = [
-        {'fecha': (desde + timedelta(days=i)).isoformat(), 'total': round(float(diarios.get(desde + timedelta(days=i), 0)), 2)}
-        for i in range(7)
-    ]
-
-    return jsonify(
-        success=True,
-        fecha_corte=corte.isoformat(),
-        mes=mes,
-        ano=ano,
-        meses_disponibles=[{'mes': m, 'ano': a} for a, m in meses_disponibles],
-        total_mes=round(sum(s['total'] for s in sucursales), 2),
-        costo_mes=round(sum(s['costo'] for s in sucursales), 2),
-        utilidad_mes=round(sum(s['utilidad'] for s in sucursales), 2),
-        ventas_sin_costo_mes=round(sum(s['ventas_sin_costo'] for s in sucursales), 2),
-        total_bruto=round(float(total_bruto or 0), 2),
-        # Días del mes con ventas cuyo USD se calculó con FACTOR por no haber tasa interna cargada.
-        dias_sin_tasa_interna=int(dias_sin_tasa or 0),
-        excepciones=[
-            {'id': e['id'], 'nombre': e['nombre'], 'categoria': e['categoria'],
-             'excluida': e['id'] in excluir, 'monto': round(float(montos_excepcion.get(e['id']) or 0), 2)}
-            for e in EXCEPCIONES
-        ],
-        grupos_principales=principales,
-        sucursales=sucursales,
-        ultimos_7_dias=ultimos_7_dias,
-    )
-
-
 @app.route('/api/capital_estancado', methods=['GET'])
 def capital_estancado():
     dias_min = request.args.get('dias_min', default=90, type=int)
@@ -924,69 +698,6 @@ def revisar_discrepancia(id_):
     return jsonify(success=True, discrepancia=serializar_discrepancia(d))
 
 
-@app.route('/api/tasas', methods=['GET'])
-def listar_tasas():
-    """Tasas BCV e interna vigentes en ?fecha= (por defecto hoy) y el historial de los ?dias= anteriores."""
-    fecha = parsear_fecha(request.args.get('fecha')) or datetime.today().date()
-    dias = request.args.get('dias', default=30, type=int)
-
-    def vigente(columna):
-        # Última tasa registrada en o antes de la fecha (fines de semana y feriados no tienen tasa BCV propia).
-        t = TasaInterna.query.filter(TasaInterna.fecha <= fecha, columna.isnot(None)).order_by(TasaInterna.fecha.desc()).first()
-        return {'fecha': t.fecha.isoformat(), 'valor': float(getattr(t, columna.key))} if t else None
-
-    historial = TasaInterna.query.filter(
-        TasaInterna.fecha <= fecha, TasaInterna.fecha > fecha - timedelta(days=dias)
-    ).order_by(TasaInterna.fecha.desc()).all()
-    desde, hasta = db.session.query(func.min(TasaInterna.fecha), func.max(TasaInterna.fecha)).one()
-
-    return jsonify(
-        success=True,
-        fecha=fecha.isoformat(),
-        bcv=vigente(TasaInterna.tasa_bcv),
-        interna=vigente(TasaInterna.tasa_paralelo),
-        rango={'desde': desde.isoformat() if desde else None, 'hasta': hasta.isoformat() if hasta else None},
-        historial=[
-            {'fecha': t.fecha.isoformat(),
-             'bcv': float(t.tasa_bcv) if t.tasa_bcv is not None else None,
-             'interna': float(t.tasa_paralelo) if t.tasa_paralelo is not None else None}
-            for t in historial
-        ],
-    )
-
-
-@app.route('/api/tasas', methods=['POST'])
-def guardar_tasas():
-    """Recibe {"lista_tasas": "2026-10-01 36,50\n02/10/2026 36,75"} (una fecha y tasa por línea)."""
-    datos = request.get_json(silent=True) or {}
-    lista_tasas_raw = (datos.get('lista_tasas') or '').strip()
-    if not lista_tasas_raw:
-        return jsonify(success=False, error="No se recibieron tasas."), 400
-
-    guardadas = 0
-    try:
-        for linea in lista_tasas_raw.splitlines():
-            partes = re.split(r'[\t,\s]+', linea.strip(), maxsplit=1)
-            if len(partes) < 2:
-                continue
-            fecha_obj = parsear_fecha(partes[0])
-            tasa_val = numero(partes[1], None)
-            if fecha_obj is None or tasa_val is None:
-                continue
-            tasa_existente = db.session.get(TasaInterna, fecha_obj)
-            if tasa_existente:
-                tasa_existente.tasa_paralelo = tasa_val
-            else:
-                db.session.add(TasaInterna(fecha=fecha_obj, tasa_paralelo=tasa_val))
-            guardadas += 1
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        return jsonify(success=False, error=f"Error guardando tasas: {e}"), 500
-
-    return jsonify(success=True, message=f"Historial cambiario actualizado: {guardadas} tasas.")
-
-
 # Errores HTTP también en JSON para que el frontend siempre pueda leer la respuesta.
 @app.errorhandler(404)
 def no_encontrado(_):
@@ -1007,6 +718,7 @@ casos_demanda = CasosDemanda(RepositorioDemandaSQL(), repo_traslados)
 app.register_blueprint(blueprint_traslados(
     CasosTraslados(repo_traslados, inventario, casos_demanda.sugerencias_traslado, casos_demanda.clasificacion_abc)))
 app.register_blueprint(blueprint_demanda(casos_demanda))
+app.register_blueprint(blueprint_ventas(CasosVentas(RepositorioVentasSQL())))
 
 
 if __name__ == '__main__':
