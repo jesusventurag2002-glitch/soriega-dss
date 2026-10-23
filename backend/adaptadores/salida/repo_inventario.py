@@ -16,3 +16,7 @@ class InventarioSQL:
 
     def articulo(self, codigo):
         return db.session.get(Articulo, codigo)
+
+    def sucursales_con_inventario(self):
+        return sorted(s for (s,) in db.session.query(Inventario.sucursal).filter(
+            Inventario.origen_inventario == 'INV').distinct() if s)

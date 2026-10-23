@@ -86,11 +86,14 @@ class RepositorioTrasladosSQL:
     def eventos(self, d):
         return EventoDocumento.query.filter_by(documento_id=d.id).order_by(EventoDocumento.fecha, EventoDocumento.id).all()
 
-    def lineas_abiertas(self, origen=None, destino=None, articulo=None):
+    def lineas_abiertas(self, origen=None, destino=None, articulo=None, tipo=None, articulos=None):
         q = Traslado.query.filter(Traslado.estado.in_(ESTADOS_ABIERTOS))
-        for columna, valor in ((Traslado.origen, origen), (Traslado.destino, destino), (Traslado.articulo_codigo, articulo)):
+        for columna, valor in ((Traslado.origen, origen), (Traslado.destino, destino), (Traslado.articulo_codigo, articulo),
+                               (Traslado.tipo, tipo)):
             if valor is not None:
                 q = q.filter(columna == valor)
+        if articulos is not None:
+            q = q.filter(Traslado.articulo_codigo.in_(articulos))
         return q.all()
 
     def conteo_por_estado(self, filtros):

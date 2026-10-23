@@ -19,8 +19,8 @@ class RepositorioTraslados(Protocol):
     def eventos(self, d: Documento) -> list:
         """Historial del documento en orden cronológico."""
 
-    def lineas_abiertas(self, origen: str | None = None, destino: str | None = None,
-                        articulo: str | None = None) -> list[Linea]: ...
+    def lineas_abiertas(self, origen: str | None = None, destino: str | None = None, articulo: str | None = None,
+                        tipo: str | None = None, articulos: list[str] | None = None) -> list[Linea]: ...
 
     def conteo_por_estado(self, filtros: dict) -> dict[str, int]: ...
 
@@ -41,3 +41,5 @@ class ConsultaInventario(Protocol):
 
     def articulo(self, codigo: str):
         """Artículo del catálogo (codigo, nombre, …) o None."""
+
+    def sucursales_con_inventario(self) -> list[str]: ...
