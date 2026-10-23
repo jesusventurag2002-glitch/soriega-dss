@@ -12,12 +12,16 @@ from flask_cors import CORS
 from sqlalchemy import and_, case, func, inspect, or_, text, true
 
 from adaptadores.entrada.http import estado_http, usuario_actual
-from adaptadores.entrada.traslados import crear_blueprint, resumen_documento, serializar_evento
+from adaptadores.entrada.demanda import crear_blueprint as blueprint_demanda
+from adaptadores.entrada.traslados import crear_blueprint as blueprint_traslados, resumen_documento, serializar_evento
 from adaptadores.salida.migraciones import agrupar_traslados_en_documentos, migrar_esquema  # noqa: F401 (pruebas)
+from adaptadores.salida.repo_demanda import RepositorioDemandaSQL
 from adaptadores.salida.repo_inventario import InventarioSQL
 from adaptadores.salida.repo_traslados import ORDENES, RepositorioTrasladosSQL
+from aplicacion.demanda import CasosDemanda
 from aplicacion.traslados import CasosTraslados
 from dominio.comun import entero
+from dominio.demanda import DIAS_COBERTURA_CRITICA
 from dominio.errores import Conflicto, ErrorDominio
 from dominio.traslados import ALMACEN, ESTADOS_ABIERTOS, cantidad_vigente, folio
 from adaptadores.salida.modelos import (
@@ -483,126 +487,6 @@ def ventas_con_tasa(*columnas):
     return db.session.query(*columnas).select_from(Venta).outerjoin(TasaInterna, TasaInterna.fecha == Venta.fecha_emision)
 
 
-def clasificacion_abc():
-    """Clasifica por rotación (unidades netas vendidas): A = primer 80% acumulado, B = siguiente 15%, C = resto."""
-    unidades = db.session.query(
-        Venta.articulo_codigo, func.sum(Venta.cantidad_neta)
-    ).filter(ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo).order_by(func.sum(Venta.cantidad_neta).desc()).all()
-
-    total = sum(max(int(u or 0), 0) for _, u in unidades)
-    abc, acumulado = {}, 0
-    for codigo, u in unidades:
-        participacion_previa = acumulado / total if total else 1
-        abc[codigo] = 'A' if participacion_previa < 0.80 else 'B' if participacion_previa < 0.95 else 'C'
-        acumulado += max(int(u or 0), 0)
-    return abc
-
-
-def datos_demanda():
-    """Stock (almacén y por sucursal) y venta diaria comercial por artículo, insumos de traslados y alertas."""
-    stock_almacen, stock_sucursal = {}, {}
-    for codigo, origen, sucursal, total in db.session.query(
-        Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal, func.sum(Inventario.existencia)
-    ).group_by(Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal):
-        if origen == 'INVAL':
-            stock_almacen[codigo] = stock_almacen.get(codigo, 0) + int(total or 0)
-        else:
-            stock_sucursal[(codigo, sucursal or 'Sin asignar')] = int(total or 0)
-    # Solo se consideran sucursales con inventario cargado (sin él, su stock es desconocido).
-    sucursales = sorted({s for _, s in stock_sucursal})
-
-    def venta_diaria(unidades, desde, hasta):
-        rango_dias = (hasta - desde).days + 1 if desde else 30
-        return int(unidades or 0) / (rango_dias if rango_dias > 0 else 1)
-
-    vpd_sucursal = {
-        (codigo, sucursal or 'Sin asignar'): venta_diaria(unidades, desde, hasta)
-        for codigo, sucursal, unidades, desde, hasta in db.session.query(
-            Venta.articulo_codigo, Venta.sucursal, func.sum(Venta.cantidad_neta),
-            func.min(Venta.fecha_emision), func.max(Venta.fecha_emision),
-        ).filter(ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo, Venta.sucursal)
-    }
-    vpd_total = {
-        codigo: venta_diaria(unidades, desde, hasta)
-        for codigo, unidades, desde, hasta in db.session.query(
-            Venta.articulo_codigo, func.sum(Venta.cantidad_neta),
-            func.min(Venta.fecha_emision), func.max(Venta.fecha_emision),
-        ).filter(ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo)
-    }
-    return stock_almacen, stock_sucursal, sucursales, vpd_sucursal, vpd_total
-
-
-def calcular_sugerencias_traslado(dias, comprometido_almacen=None):
-    """Necesidad de cada sucursal (venta diaria * días - stock) cubierta con el stock del almacén.
-
-    comprometido_almacen: unidades del almacén ya reservadas en traslados abiertos, que no se vuelven a repartir.
-    """
-    stock_almacen, stock_sucursal, sucursales, vpd_sucursal, _ = datos_demanda()
-    comprometido_almacen = comprometido_almacen or {}
-    abc = clasificacion_abc()
-    resultados = []
-    for art in Articulo.query.all():
-        stock_inval = stock_almacen.get(art.codigo, 0)
-        if stock_inval <= 0:
-            continue
-        necesidades = []
-        for sucursal in sucursales:
-            stock_suc = stock_sucursal.get((art.codigo, sucursal), 0)
-            vpd = vpd_sucursal.get((art.codigo, sucursal), 0)
-            faltante = round(vpd * dias - stock_suc)
-            if faltante > 0:
-                necesidades.append((stock_suc / vpd, sucursal, stock_suc, faltante))
-        # Si el almacén no alcanza para todas, se atiende primero a la sucursal con menos días de cobertura.
-        disponible = stock_inval - comprometido_almacen.get(art.codigo, 0)
-        for cobertura, sucursal, stock_suc, faltante in sorted(necesidades):
-            cant_a_mover = min(faltante, disponible)
-            if cant_a_mover <= 0:
-                break
-            disponible -= cant_a_mover
-            resultados.append({
-                'codigo': art.codigo, 'nombre': art.nombre, 'grupo': art.nombredegrupo,
-                'origen': 'INVAL', 'destino': 'INV', 'sucursal': sucursal,
-                'cantidad': cant_a_mover, 'disponible_almacen': stock_inval,
-                'stock_sucursal': stock_suc, 'clasificacion_abc': abc.get(art.codigo, 'C'),
-                'cobertura_dias': round(cobertura, 1),
-            })
-    return resultados
-
-
-@app.route('/api/logistica', methods=['POST'])
-def logistica():
-    datos = request.get_json(silent=True) or {}
-    tipo_analisis = datos.get('tipo_analisis')
-    if tipo_analisis not in ('traslado', 'reposicion'):
-        return jsonify(success=False, error="tipo_analisis debe ser 'traslado' o 'reposicion'."), 400
-    try:
-        dias = int(datos.get('dias', 15))
-    except (TypeError, ValueError):
-        return jsonify(success=False, error="dias debe ser un número entero."), 400
-
-    if tipo_analisis == 'traslado':
-        return jsonify(success=True, tipo_analisis=tipo_analisis, dias=dias, resultados=calcular_sugerencias_traslado(dias))
-
-    stock_almacen, stock_sucursal, sucursales, _, vpd_total = datos_demanda()
-    abc = clasificacion_abc()
-    resultados = []
-    for art in Articulo.query.all():
-        stock_inval = stock_almacen.get(art.codigo, 0)
-        demanda_proyectada = vpd_total.get(art.codigo, 0) * dias
-        stock_total = stock_inval + sum(stock_sucursal.get((art.codigo, s), 0) for s in sucursales)
-        if stock_total < demanda_proyectada:
-            cant_a_pedir = max(0, round(demanda_proyectada - stock_total))
-            if cant_a_pedir > 0:
-                resultados.append({
-                    'codigo': art.codigo, 'nombre': art.nombre, 'grupo': art.nombredegrupo,
-                    'proveedor': art.proveedor, 'cantidad_pedir': cant_a_pedir,
-                    'deficit': round(demanda_proyectada - stock_total),
-                    'clasificacion_abc': abc.get(art.codigo, 'C'),
-                })
-
-    return jsonify(success=True, tipo_analisis=tipo_analisis, dias=dias, resultados=resultados)
-
-
 GRUPOS_PRINCIPALES = 5  # el resto se agrupa en "OTROS" para que el desglose sea legible
 
 
@@ -741,88 +625,11 @@ def analisis_ventas():
     )
 
 
-def calcular_capital_estancado(dias_min, sucursal=None):
-    """Artículos con existencia y costo cuya última venta supera dias_min (o que no se vendieron en el historial).
-
-    Sin sucursal: existencia consolidada (todas las sucursales + almacén). Con sucursal (o ALMACEN): solo la de esa
-    ubicación. Devuelve None si no hay ventas cargadas.
-    """
-    inicio, corte = db.session.query(func.min(Venta.fecha_emision), func.max(Venta.fecha_emision)).one()
-    if corte is None:
-        return None
-    # Los días se cuentan hasta la última fecha del historial, no hasta hoy, porque los datos son una foto fija.
-    dias_historial = (corte - inicio).days
-
-    ultima_venta = dict(db.session.query(
-        Venta.articulo_codigo, func.max(Venta.fecha_emision)
-    ).filter(Venta.cantidad_neta > 0, ES_VENTA_COMERCIAL).group_by(Venta.articulo_codigo).all())
-
-    almacen, por_sucursal = {}, {}
-    for codigo, origen, ubicacion, total in db.session.query(
-        Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal, func.sum(Inventario.existencia)
-    ).group_by(Inventario.articulo_codigo, Inventario.origen_inventario, Inventario.sucursal):
-        cantidad = max(int(total or 0), 0)
-        if origen == 'INVAL':
-            almacen[codigo] = almacen.get(codigo, 0) + cantidad
-        elif cantidad:
-            por_sucursal.setdefault(codigo, {})[ubicacion or 'Sin asignar'] = cantidad
-
-    articulos = []
-    for art in Articulo.query.filter(Articulo.costoex > 0):
-        sucursales = por_sucursal.get(art.codigo, {})
-        if sucursal and sucursal != ALMACEN:
-            sucursales = {sucursal: sucursales[sucursal]} if sucursal in sucursales else {}
-        existencia_sucursal = sum(sucursales.values())
-        existencia_almacen = almacen.get(art.codigo, 0) if sucursal in (None, ALMACEN) else 0
-        if sucursal == ALMACEN:
-            sucursales, existencia_sucursal = {}, 0
-        existencia = existencia_sucursal + existencia_almacen
-        if existencia <= 0:
-            continue
-
-        ultima = ultima_venta.get(art.codigo)
-        dias_sin_vender = (corte - ultima).days if ultima else dias_historial
-        if dias_sin_vender < dias_min:
-            continue
-
-        costo = float(art.costoex)
-        articulos.append({
-            'codigo': art.codigo,
-            'descripcion': art.nombre,
-            'grupo': art.nombredegrupo,
-            'existencia': existencia,
-            'existencia_sucursal': existencia_sucursal,
-            'existencia_por_sucursal': dict(sorted(sucursales.items())),
-            'existencia_almacen': existencia_almacen,
-            'costo_unitario': round(costo, 4),
-            'dias_sin_vender': dias_sin_vender,
-            'sin_ventas': ultima is None,
-            'ultima_venta': ultima.isoformat() if ultima else None,
-            'capital_estancado': round(existencia * costo, 2),
-        })
-
-    articulos.sort(key=lambda a: a['capital_estancado'], reverse=True)
-    total = len(articulos)
-    return {
-        'fecha_corte': corte.isoformat(),
-        'dias_historial': dias_historial,
-        'dias_min': dias_min,
-        'sucursal': sucursal,
-        'resumen': {
-            'capital_total': round(sum(a['capital_estancado'] for a in articulos), 2),
-            'articulos': total,
-            'sin_ventas': sum(a['sin_ventas'] for a in articulos),
-            'promedio_dias': round(sum(a['dias_sin_vender'] for a in articulos) / total) if total else 0,
-        },
-        'articulos': articulos,
-    }
-
-
 @app.route('/api/capital_estancado', methods=['GET'])
 def capital_estancado():
     dias_min = request.args.get('dias_min', default=90, type=int)
     limite = request.args.get('limite', default=100, type=int)
-    datos = calcular_capital_estancado(dias_min, texto(request.args.get('sucursal')) or None)
+    datos = casos_demanda.capital_estancado(dias_min, texto(request.args.get('sucursal')) or None)
     if datos is None:
         return jsonify(success=False, error="No hay historial de ventas cargado."), 400
 
@@ -848,43 +655,6 @@ def capital_estancado():
 
 
 # ==================== CENTRO DE DECISIONES ====================
-# Cobertura (días de venta que cubre el stock) por debajo de la cual un artículo A o B se considera crítico.
-# Es un parámetro operativo provisional: ajustarlo cuando se defina la regla real de la empresa.
-DIAS_COBERTURA_CRITICA = 7
-
-
-def productos_criticos(sucursal=None, dias=DIAS_COBERTURA_CRITICA):
-    """Artículos A y B cuyo stock en una sucursal cubre menos de `dias` de su venta diaria.
-
-    Solo se evalúan pares artículo-sucursal presentes en el inventario cargado: sin inventario no hay certeza
-    de que el stock sea cero y no se genera la alerta.
-    """
-    stock_almacen, stock_sucursal, _, vpd_sucursal, _ = datos_demanda()
-    abc = clasificacion_abc()
-    nombres = dict(db.session.query(Articulo.codigo, Articulo.nombre).all())
-    abiertos = {(t.articulo_codigo, t.destino): t for t in Traslado.query.filter(
-        Traslado.estado.in_(ESTADOS_ABIERTOS), Traslado.origen == ALMACEN)}
-    items = []
-    for (codigo, suc), stock in stock_sucursal.items():
-        if (sucursal and suc != sucursal) or codigo not in nombres or abc.get(codigo) not in ('A', 'B'):
-            continue
-        vpd = vpd_sucursal.get((codigo, suc), 0)
-        if vpd <= 0:
-            continue
-        cobertura = max(stock, 0) / vpd
-        if cobertura >= dias:
-            continue
-        t = abiertos.get((codigo, suc))
-        items.append({
-            'codigo': codigo, 'nombre': nombres[codigo], 'sucursal': suc, 'clasificacion_abc': abc[codigo],
-            'stock': stock, 'venta_diaria': round(vpd, 2), 'cobertura_dias': round(cobertura, 1),
-            'stock_almacen': stock_almacen.get(codigo, 0),
-            'traslado': {'id': t.documento_id, 'folio': folio(t.documento), 'estado': t.estado} if t else None,
-        })
-    items.sort(key=lambda i: (i['clasificacion_abc'], i['cobertura_dias'], i['nombre']))
-    return items
-
-
 def estado_de_los_datos():
     """Qué datos hay cargados por ubicación, cuándo se importaron y hasta qué fecha llegan."""
     def ultima(tipo, sucursal=None):
@@ -925,8 +695,8 @@ def dashboard():
     def lista(estados, orden, limite=5):
         return [resumen_documento(d) for d in traslados.filter(DocumentoTraslado.estado.in_(estados)).order_by(*orden).limit(limite)]
 
-    criticos = productos_criticos(sucursal)
-    capital = calcular_capital_estancado(90, sucursal)
+    criticos = casos_demanda.productos_criticos(sucursal)
+    capital = casos_demanda.capital_estancado(90, sucursal)
     acciones = AccionEstancado.query.filter_by(estado='pendiente').order_by(AccionEstancado.creado_en)
     discrepancias = Discrepancia.query.filter_by(estado='pendiente')
     if sucursal:
@@ -967,13 +737,6 @@ def dashboard():
         importaciones=[serializar_importacion(i) for i in Importacion.query.order_by(Importacion.fecha_importacion.desc()).limit(5)],
         datos=estado_de_los_datos(),
     )
-
-
-@app.route('/api/inventario/criticos', methods=['GET'])
-def listar_criticos():
-    sucursal = texto(request.args.get('sucursal')) or None
-    dias = request.args.get('dias', default=DIAS_COBERTURA_CRITICA, type=int)
-    return jsonify(success=True, dias_cobertura=dias, items=productos_criticos(sucursal, dias))
 
 
 def serializar_importacion(i):
@@ -1082,7 +845,7 @@ def consultar_stock():
     )).order_by((Articulo.codigo == termino).desc(), Articulo.nombre).limit(20).all()
     codigos = [a.codigo for a in articulos]
     existencias = existencias_por_ubicacion(codigos)
-    abc = clasificacion_abc()
+    abc = casos_demanda.clasificacion_abc()
     pendientes = {(d.articulo_codigo, d.sucursal) for d in Discrepancia.query.filter(
         Discrepancia.articulo_codigo.in_(codigos), Discrepancia.estado == 'pendiente')}
     return jsonify(success=True, items=[{
@@ -1239,8 +1002,11 @@ def archivo_muy_grande(_):
 
 
 inventario = InventarioSQL()
-app.register_blueprint(crear_blueprint(
-    CasosTraslados(RepositorioTrasladosSQL(), inventario, calcular_sugerencias_traslado, clasificacion_abc)))
+repo_traslados = RepositorioTrasladosSQL()
+casos_demanda = CasosDemanda(RepositorioDemandaSQL(), repo_traslados)
+app.register_blueprint(blueprint_traslados(
+    CasosTraslados(repo_traslados, inventario, casos_demanda.sugerencias_traslado, casos_demanda.clasificacion_abc)))
+app.register_blueprint(blueprint_demanda(casos_demanda))
 
 
 if __name__ == '__main__':
