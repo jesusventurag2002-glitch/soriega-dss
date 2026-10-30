@@ -43,3 +43,9 @@ class ConsultaInventario(Protocol):
         """Artículo del catálogo (codigo, nombre, …) o None."""
 
     def sucursales_con_inventario(self) -> list[str]: ...
+
+    def costos(self, codigos: list[str]) -> dict[str, float]:
+        """Costo sin IVA (costoex) por código."""
+
+    def tasa_interna(self, hasta) -> float | None:
+        """Tasa interna vigente a esa fecha (la última registrada)."""

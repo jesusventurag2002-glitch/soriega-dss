@@ -28,7 +28,7 @@ from aplicacion.traslados import CasosTraslados
 from aplicacion.ventas import CasosVentas
 # Las pruebas de integración preparan datos con los modelos y la migración a través de este módulo.
 from adaptadores.salida.migraciones import agrupar_traslados_en_documentos  # noqa: F401
-from adaptadores.salida.modelos import Articulo, EventoTraslado, Inventario, Traslado, Venta, db  # noqa: F401
+from adaptadores.salida.modelos import Articulo, EventoTraslado, Inventario, TasaInterna, Traslado, Venta, db  # noqa: F401
 
 app = Flask(__name__)
 

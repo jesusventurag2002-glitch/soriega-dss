@@ -1,7 +1,9 @@
 """Rutas HTTP de traslados y su formato JSON."""
+import io
 import json
 
-from flask import Blueprint, jsonify, request
+import pandas as pd
+from flask import Blueprint, jsonify, request, send_file
 
 from adaptadores.entrada.http import estado_http, usuario_actual
 from aplicacion.traslados import CasosTraslados
@@ -104,6 +106,18 @@ def crear_blueprint(casos: CasosTraslados):
         except ErrorDominio as e:
             return error(e)
         return jsonify(success=True, traslado=detalle(d, usuario_actual()[1]))
+
+    @bp.get('/api/traslados/<int:id_>/excel')
+    def exportar_traslado(id_):
+        try:
+            nombre, filas = casos.exportacion(id_)
+        except ErrorDominio as e:
+            return jsonify(success=False, error=str(e)), estado_http(e)
+        archivo = io.BytesIO()
+        pd.DataFrame(filas, columns=['Código', 'Descripción', 'Cantidad', 'Costo (sin IVA)', 'Costo x tasa interna'])             .to_excel(archivo, index=False)
+        archivo.seek(0)
+        return send_file(archivo, as_attachment=True, download_name=nombre,
+                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
     @bp.patch('/api/traslados/<int:id_>')
     def editar_traslado(id_):

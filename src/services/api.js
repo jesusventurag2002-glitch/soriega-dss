@@ -61,6 +61,26 @@ export const generarTraslados = (dias, clases) => pedir('/api/traslados/generar'
 export const retirarArticulo = (id, lineaId, version, comentario) =>
   pedir(`/api/traslados/${id}/lineas/${lineaId}`, { metodo: 'DELETE', cuerpo: { version, comentario } }).then((d) => d.traslado);
 export const loteTraslados = (accion, items) => pedir('/api/traslados/lote', { metodo: 'POST', cuerpo: { accion, items } });
+// Descarga el Excel del traslado con el nombre que asigna el servidor (fecha + sucursal).
+export async function exportarTraslado(id) {
+  let respuesta;
+  try {
+    respuesta = await fetch(`${API_URL}/api/traslados/${id}/excel`, { headers: cabecerasUsuario() });
+  } catch {
+    throw new ErrorApi('No se pudo conectar con el servidor. Verifica que el backend esté activo.', 0);
+  }
+  if (!respuesta.ok) {
+    const data = await respuesta.json().catch(() => ({}));
+    throw new ErrorApi(data.error || `Error del servidor (HTTP ${respuesta.status}).`, respuesta.status, data);
+  }
+  const disposicion = respuesta.headers.get('Content-Disposition') ?? '';
+  const utf8 = disposicion.match(/filename\*=UTF-8''([^;]+)/i);
+  const enlace = document.createElement('a');
+  enlace.href = URL.createObjectURL(await respuesta.blob());
+  enlace.download = utf8 ? decodeURIComponent(utf8[1]) : disposicion.match(/filename="?([^";]+)/)?.[1] ?? `traslado-${id}.xlsx`;
+  enlace.click();
+  URL.revokeObjectURL(enlace.href);
+}
 export const crearRetorno = (datos) => pedir('/api/traslados', { metodo: 'POST', cuerpo: datos }).then((d) => d.traslado);
 
 // ---- Mercancía estancada ----

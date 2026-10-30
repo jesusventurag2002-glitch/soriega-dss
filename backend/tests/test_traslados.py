@@ -138,6 +138,25 @@ def test_recepcion_exacta_queda_recibido(cliente, datos_basicos):
     assert d['estado'] == 'recibido' and d['lineas'][0]['diferencia'] == 0
 
 
+def test_exporta_excel_del_traslado_aprobado(app, cliente, datos_basicos):
+    import io
+    import pandas as pd
+    generar(cliente)
+    d = primer_traslado(cliente)
+    assert cliente.get(f"/api/traslados/{d['id']}/excel").status_code == 409  # borrador: aún no se exporta
+    d = accion(cliente, accion(cliente, d, 'enviar').get_json()['traslado'], 'aprobar', GERENTE).get_json()['traslado']
+    assert cliente.get(f"/api/traslados/{d['id']}/excel").status_code == 409  # sin tasa interna
+    app.db.session.add(app.TasaInterna(fecha=date(2026, 1, 1), tasa_paralelo=40))
+    app.db.session.commit()
+
+    r = cliente.get(f"/api/traslados/{d['id']}/excel")
+    assert r.status_code == 200
+    assert f"{date.today():%d%m%y}%20TRASLADO%28BARCELONA%29.xlsx" in r.headers['Content-Disposition'] \
+        or f"{date.today():%d%m%y} TRASLADO(BARCELONA).xlsx" in r.headers['Content-Disposition']
+    filas = pd.read_excel(io.BytesIO(r.data)).values.tolist()
+    assert filas == [['A1', 'Aceite 1L', 28, 5, 200]]  # costoex 5 x tasa 40
+
+
 def test_transiciones_invalidas_se_rechazan(cliente, datos_basicos):
     generar(cliente)
     d = primer_traslado(cliente)
