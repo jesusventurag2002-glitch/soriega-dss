@@ -28,6 +28,7 @@ ESTADOS_ABIERTOS = ['borrador', 'pendiente_aprobacion', 'aprobado', 'despachado'
 # Unidades reservadas en el origen: todavía no salieron y no deben asignarse a otro traslado. Lo despachado no se
 # descuenta porque las existencias vienen de exportaciones y la siguiente ya reflejará la salida.
 ESTADOS_COMPROMETEN_ORIGEN = ['pendiente_aprobacion', 'aprobado']
+ESTADOS_EXPORTABLES = ('aprobado', 'despachado', 'recibido', 'recibido_con_diferencias', 'cerrado')
 
 # acción -> (estados desde los que se permite, roles autorizados; None = cualquier rol)
 TRANSICIONES = {

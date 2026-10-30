@@ -1,5 +1,5 @@
 """Casos de uso de traslados: orquestan el dominio y persisten mediante los puertos."""
-from datetime import datetime
+from datetime import date, datetime
 
 from dominio import traslados as dom
 from dominio.comun import entero, texto
@@ -34,6 +34,22 @@ class CasosTraslados:
 
     def revertir(self):
         self.repo.revertir()
+
+    def exportacion(self, id_):
+        """(nombre de archivo, filas) del traslado aprobado: código, descripción, cantidad, costo sin IVA y costo a la tasa interna."""
+        d = self.obtener(id_)
+        if d.estado not in dom.ESTADOS_EXPORTABLES:
+            raise Conflicto('Solo se exporta un traslado aprobado.')
+        hoy = date.today()
+        tasa = self.inventario.tasa_interna(hoy)
+        if tasa is None:
+            raise Conflicto('No hay tasa interna registrada para calcular el costo.')
+        lineas = sorted(dom.lineas_vigentes(d), key=dom.prioridad_linea)
+        costos = self.inventario.costos([l.articulo_codigo for l in lineas])
+        filas = [(l.articulo_codigo, l.articulo_nombre, dom.cantidad_vigente(l), round(costos.get(l.articulo_codigo, 0), 4),
+                  round(costos.get(l.articulo_codigo, 0) * tasa, 2)) for l in lineas]
+        sucursal = d.origen if d.destino == dom.ALMACEN else d.destino
+        return f"{hoy:%d%m%y} TRASLADO({sucursal.upper()}).xlsx", filas
 
     def _guardar(self, d, eventos):
         for e in eventos:

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Check, Send, Trash2, Truck, PackageCheck, Archive, X, Save, RotateCcw, Package } from 'lucide-react';
+import { ArrowRight, Check, Send, Trash2, Truck, PackageCheck, Archive, X, Save, RotateCcw, Package, FileDown } from 'lucide-react';
 import { AbcBadge, EstadoBadge } from '../Badges.jsx';
 import Boton from '../ui/Boton.jsx';
 import Aviso from '../ui/Aviso.jsx';
 import Dialogo from '../ui/Dialogo.jsx';
-import { obtenerTraslado } from '../../services/api.js';
+import { exportarTraslado, obtenerTraslado } from '../../services/api.js';
+import { useAvisos } from '../ui/Avisos.jsx';
 import { ROLES } from '../../auth/roles.js';
 import { CAMPOS, EVENTOS, SIGUIENTE_PASO, fechaHora } from './estados.js';
 
@@ -34,6 +35,9 @@ const ETAPAS = [
   ['cantidad_despachada', 'Despachada'],
   ['cantidad_recibida', 'Recibida'],
 ];
+
+// Desde la aprobación el documento ya tiene cantidades definitivas para exportar.
+const EXPORTABLES = ['aprobado', 'despachado', 'recibido', 'recibido_con_diferencias', 'cerrado'];
 
 const esEntero = (v, minimo) => v !== '' && Number.isInteger(Number(v)) && Number(v) >= minimo;
 const conSigno = (n) => `${n > 0 ? '+' : ''}${n}`;
@@ -507,6 +511,8 @@ export default function DetalleTraslado({ id, version, ejecutar, editar, retirar
   // Cantidades capturadas: parten de la etapa anterior y se descartan con cada nueva versión del documento.
   const [edicion, setEdicion] = useState({ clave: null, valores: {} });
   const [errores, setErrores] = useState({});
+  const [exportando, setExportando] = useState(false);
+  const avisar = useAvisos();
 
   // Se recarga al abrir y cuando la fila cambia en la lista (otra acción o sincronización con el servidor).
   useEffect(() => {
@@ -562,7 +568,26 @@ export default function DetalleTraslado({ id, version, ejecutar, editar, retirar
 
   return (
     <div>
-      <Seccion titulo="Resumen">
+      <Seccion
+        titulo="Resumen"
+        accion={
+          EXPORTABLES.includes(d.estado) && (
+            <Boton
+              tamano="sm"
+              icono={FileDown}
+              cargando={exportando}
+              onClick={() => {
+                setExportando(true);
+                exportarTraslado(d.id)
+                  .catch((e) => avisar({ tono: 'error', titulo: `No se pudo exportar ${d.folio}`, texto: e.message }))
+                  .finally(() => setExportando(false));
+              }}
+            >
+              Exportar Excel
+            </Boton>
+          )
+        }
+      >
         <div className="flex flex-wrap items-center gap-2">
           <EstadoBadge estado={d.estado} />
           {d.tipo === 'retorno' && <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">Retorno al almacén</span>}
