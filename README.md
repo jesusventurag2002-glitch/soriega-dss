@@ -4,7 +4,7 @@ Sistema de apoyo a decisiones para el inventario de una cadena de tiendas: carga
 
 - **Frontend:** React 18 + Vite + Tailwind CSS (`src/`)
 - **Backend:** Flask + SQLAlchemy sobre PostgreSQL, en arquitectura hexagonal (`backend/`)
-- **Documentación:** modelo de dominio y boceto de tesis (`docs/`)
+- **Documentación:** modelo de dominio, boceto de tesis y [lógica del backend](docs/logica-backend.md) (`docs/`)
 
 ## Requisitos
 
