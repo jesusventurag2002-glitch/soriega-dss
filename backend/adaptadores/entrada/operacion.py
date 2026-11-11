@@ -47,8 +47,9 @@ def crear_blueprint(estancado: CasosEstancado, tienda: CasosTienda, tablero: Cas
     @bp.get('/api/capital_estancado')
     def capital_estancado():
         try:
-            datos = estancado.capital_estancado(request.args.get('dias_min', default=90, type=int),
-                                                request.args.get('limite', default=100, type=int),
+            # Límites para que un valor enorme no desborde las fechas ni dispare consultas pesadas.
+            datos = estancado.capital_estancado(min(max(request.args.get('dias_min', default=90, type=int), 0), 3650),
+                                                min(max(request.args.get('limite', default=100, type=int), 1), 1000),
                                                 texto(request.args.get('sucursal')) or None)
         except ErrorDominio as e:
             return error(e)
