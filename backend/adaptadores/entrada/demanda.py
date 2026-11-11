@@ -16,7 +16,7 @@ def crear_blueprint(casos: CasosDemanda):
         if tipo_analisis not in ('traslado', 'reposicion'):
             return jsonify(success=False, error="tipo_analisis debe ser 'traslado' o 'reposicion'."), 400
         try:
-            dias = int(datos.get('dias', 15))
+            dias = min(max(int(datos.get('dias', 15)), 1), 365)
         except (TypeError, ValueError):
             return jsonify(success=False, error="dias debe ser un número entero."), 400
         resultados = casos.sugerencias_traslado(dias) if tipo_analisis == 'traslado' else casos.reposicion(dias)
@@ -25,7 +25,7 @@ def crear_blueprint(casos: CasosDemanda):
     @bp.get('/api/inventario/criticos')
     def listar_criticos():
         sucursal = texto(request.args.get('sucursal')) or None
-        dias = request.args.get('dias', default=DIAS_COBERTURA_CRITICA, type=int)
+        dias = min(max(request.args.get('dias', default=DIAS_COBERTURA_CRITICA, type=int), 1), 365)
         return jsonify(success=True, dias_cobertura=dias, items=casos.productos_criticos(sucursal, dias))
 
     return bp

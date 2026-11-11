@@ -18,9 +18,10 @@ def crear_blueprint(casos: CasosImportacion):
                                    usuario_actual())
         except ErrorDominio as e:
             return jsonify(success=False, error=str(e)), estado_http(e)
-        except Exception as e:
+        except Exception:
+            # El detalle (rutas, internos de pandas) queda en el log, no en la respuesta.
             current_app.logger.exception("Error procesando carga inicial")
-            return jsonify(success=False, error=f"Error procesando el archivo: {e}"), 500
+            return jsonify(success=False, error="No se pudo procesar el archivo. Revisa que sea el reporte correcto."), 500
         return jsonify(success=True, message=mensaje), 200
 
     return bp

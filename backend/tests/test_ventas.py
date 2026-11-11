@@ -39,3 +39,9 @@ def test_variacion_contra_los_mismos_dias_del_mes_anterior(cliente, app):
     # Corte el 5/11: se compara con el 1-5/10, no con todo octubre.
     assert (d['total_mes'], d['total_bs_mes']) == (60, 6000)
     assert d['mes_anterior'] == {'total': 40, 'desde': '2026-10-01', 'hasta': '2026-10-05'}
+
+
+def test_parametros_enormes_se_acotan_en_lugar_de_fallar(cliente):
+    # Sin límite, /api/tasas con dias=10**9 desbordaba la fecha y respondía 500.
+    assert cliente.get('/api/tasas?dias=1000000000', headers=GERENTE).status_code == 200
+    assert cliente.get('/api/inventario/criticos?dias=1000000000', headers=GERENTE).status_code == 200

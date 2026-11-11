@@ -40,7 +40,7 @@ def crear_blueprint(casos: CasosVentas):
     def listar_tasas():
         """Tasas BCV e interna vigentes en ?fecha= (por defecto hoy) y el historial de los ?dias= anteriores."""
         fecha = parsear_fecha(request.args.get('fecha')) or datetime.today().date()
-        return jsonify(success=True, **casos.tasas(fecha, request.args.get('dias', default=30, type=int)))
+        return jsonify(success=True, **casos.tasas(fecha, min(max(request.args.get('dias', default=30, type=int), 1), 3650)))
 
     @bp.post('/api/tasas')
     def guardar_tasas():
