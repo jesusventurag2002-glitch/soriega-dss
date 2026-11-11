@@ -6,6 +6,7 @@ from dominio import estancado, tienda
 from dominio.comun import entero, numero, texto
 from dominio.demanda import DIAS_COBERTURA_CRITICA
 from dominio.errores import Conflicto, ErrorDominio, NoEncontrado
+from dominio.traslados import EVENTOS_MOVIMIENTO
 from puertos.operacion import RepositorioAcciones, RepositorioTablero, RepositorioTienda
 from puertos.traslados import ConsultaInventario, RepositorioTraslados
 
@@ -179,7 +180,6 @@ class CasosTablero:
             },
             'acciones_estancado': {'pendientes': len(acciones), 'items': acciones[:5]},
             'discrepancias_pendientes': self.repo.discrepancias_pendientes(sucursal),
-            'actividad': self.repo.actividad(sucursal, 10),
-            'importaciones': self.repo.importaciones(5),
+            'actividad': self.repo.actividad(sucursal, 100, EVENTOS_MOVIMIENTO),
             'datos': self.estado_de_los_datos(),
         }

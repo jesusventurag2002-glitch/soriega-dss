@@ -47,12 +47,19 @@ class CasosVentas:
         excluir = self.a_excluir(excluir)
         principales, sucursales = dom.analisis_por_sucursal(self.repo.rentabilidad_mes(mes, ano, excluir))
         montos = self.repo.montos_excepcion(mes, ano)
+        periodo, anterior = dom.periodos_comparables(mes, ano, corte)
+        _, total_bs = self.repo.facturado(*periodo, excluir)
+        total_anterior, _ = self.repo.facturado(*anterior, excluir)
         return {
             'fecha_corte': corte.isoformat(),
             'mes': mes,
             'ano': ano,
             'meses_disponibles': [{'mes': m, 'ano': a} for a, m in self.repo.meses_disponibles()],
             'total_mes': round(sum(s['total'] for s in sucursales), 2),
+            'total_bs_mes': round(float(total_bs), 2),
+            # Mismos días del mes anterior (ver dom.periodos_comparables), para la variación del mes.
+            'mes_anterior': {'total': round(float(total_anterior), 2), 'desde': anterior[0].isoformat(),
+                             'hasta': anterior[1].isoformat()},
             'costo_mes': round(sum(s['costo'] for s in sucursales), 2),
             'utilidad_mes': round(sum(s['utilidad'] for s in sucursales), 2),
             'ventas_sin_costo_mes': round(sum(s['ventas_sin_costo'] for s in sucursales), 2),

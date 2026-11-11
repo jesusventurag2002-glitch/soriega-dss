@@ -15,6 +15,9 @@ class RepositorioVentas(Protocol):
     def totales_mes(self, mes: int, ano: int, excluir: list[str]) -> tuple[float, float]:
         """(facturación, costo) del mes sin las excepciones indicadas."""
 
+    def facturado(self, desde: date, hasta: date, excluir: list[str]) -> tuple[float, float]:
+        """(USD, Bs) facturados entre las dos fechas, ambas incluidas, sin las excepciones indicadas."""
+
     def por_grupo_mes(self, mes: int, ano: int, excluir: list[str]) -> list[tuple]:
         """[(grupo, total)] de mayor a menor."""
 

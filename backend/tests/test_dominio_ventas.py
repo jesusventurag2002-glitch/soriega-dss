@@ -58,3 +58,12 @@ def test_leer_lista_tasas():
 def test_numero_y_fecha_toleran_valores_vacios():
     assert numero(float('nan'), 7) == 7 and numero('1,5') == 1.5 and numero(None, None) is None
     assert parsear_fecha(float('nan')) is None and parsear_fecha('15/10/2026 08:00') == date(2026, 10, 15)
+
+
+def test_periodos_comparables():
+    corte = date(2026, 3, 31)
+    # Febrero no tiene 31: el mes anterior se recorta a su último día.
+    assert dom.periodos_comparables(3, 2026, corte) == ((date(2026, 3, 1), date(2026, 3, 31)), (date(2026, 2, 1), date(2026, 2, 28)))
+    # Enero se compara con diciembre del año anterior; un mes pasado se toma completo.
+    assert dom.periodos_comparables(1, 2026, corte) == ((date(2026, 1, 1), date(2026, 1, 31)), (date(2025, 12, 1), date(2025, 12, 31)))
+    assert dom.periodos_comparables(12, 2026, date(2026, 12, 10))[1] == (date(2026, 11, 1), date(2026, 11, 10))

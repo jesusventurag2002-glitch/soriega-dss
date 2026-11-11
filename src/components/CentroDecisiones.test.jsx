@@ -18,7 +18,6 @@ const datosBase = {
   capital_estancado: { total: 1500, articulos: 12, dias_min: 90, fecha_corte: '2026-10-16', consolidado: true },
   acciones_estancado: { pendientes: 0, items: [] },
   actividad: [],
-  importaciones: [],
   datos: {
     sucursales: [
       { sucursal: 'Barcelona', inventario: { cargado: true, importado_en: '2026-10-17T20:00:00' }, ventas: { cargado: true, importado_en: null, datos_hasta: '2026-10-16' } },
