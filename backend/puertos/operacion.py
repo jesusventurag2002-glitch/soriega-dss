@@ -51,8 +51,8 @@ class RepositorioTablero(Protocol):
     def documentos(self, sucursal: str | None, estados: list[str], orden: str, limite: int) -> list:
         """orden: 'prioridad' (clase ABC y cobertura) o 'antiguos' (sin actualizar desde hace más tiempo)."""
 
-    def actividad(self, sucursal: str | None, limite: int) -> list[tuple]:
-        """[(evento, documento)] de los traslados, del más reciente al más antiguo."""
+    def actividad(self, sucursal: str | None, limite: int, tipos: tuple[str, ...]) -> list[tuple]:
+        """[(evento, documento)] de los traslados con eventos de esos tipos, del más reciente al más antiguo."""
 
     def discrepancias_pendientes(self, sucursal: str | None) -> int: ...
 

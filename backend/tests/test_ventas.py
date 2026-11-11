@@ -27,3 +27,15 @@ def test_utilidad_por_sucursal_y_grupo(cliente, app):
     assert (otros['grupo'], otros['total'], otros['utilidad']) == ('OTROS', 30, 20)
     assert [g['grupo'] for g in s['todos_los_grupos']] == [f'G{i}' for i in range(7)]
     assert s['todos_los_grupos'][-1]['ventas_sin_costo'] == 10
+
+
+def test_variacion_contra_los_mismos_dias_del_mes_anterior(cliente, app):
+    for fecha, usd in [(date(2026, 10, 3), 40), (date(2026, 10, 20), 500), (date(2026, 11, 2), 30), (date(2026, 11, 5), 30)]:
+        app.db.session.add(app.Venta(documento='F', articulo_codigo='A1', grupo_venta='G', cantidad_neta=1,
+                                     precio_fin_moneda_local=usd, factor_sistema=1, factura_real_usd=usd, factura_bs=usd * 100, fecha_emision=fecha, sucursal='Barcelona'))
+    app.db.session.commit()
+
+    d = cliente.get('/api/ventas/analisis?excluir=', headers=GERENTE).get_json()
+    # Corte el 5/11: se compara con el 1-5/10, no con todo octubre.
+    assert (d['total_mes'], d['total_bs_mes']) == (60, 6000)
+    assert d['mes_anterior'] == {'total': 40, 'desde': '2026-10-01', 'hasta': '2026-10-05'}

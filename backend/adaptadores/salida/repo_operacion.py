@@ -93,9 +93,9 @@ class RepositorioTableroSQL:
         return de_la_sucursal(DocumentoTraslado.query, sucursal).filter(DocumentoTraslado.estado.in_(estados)).order_by(
             *self.ORDENES[orden]).limit(limite).all()
 
-    def actividad(self, sucursal, limite):
+    def actividad(self, sucursal, limite, tipos):
         q = db.session.query(EventoDocumento, DocumentoTraslado).join(
-            DocumentoTraslado, DocumentoTraslado.id == EventoDocumento.documento_id)
+            DocumentoTraslado, DocumentoTraslado.id == EventoDocumento.documento_id).filter(EventoDocumento.tipo.in_(tipos))
         return de_la_sucursal(q, sucursal).order_by(EventoDocumento.fecha.desc(), EventoDocumento.id.desc()).limit(limite).all()
 
     def discrepancias_pendientes(self, sucursal):

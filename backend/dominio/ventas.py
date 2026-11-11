@@ -1,7 +1,7 @@
 """Reglas de ventas: excepciones (ventas que no son facturación comercial), rentabilidad por sucursal y grupo, y
 lectura de tasas cambiarias escritas a mano."""
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 
 from dominio.comun import numero, parsear_fecha
 from dominio.errores import ErrorDominio
@@ -79,6 +79,18 @@ def analisis_por_sucursal(filas):
         }
 
     return principales, sorted((resumen(s) for s in por_sucursal), key=lambda s: s['total'], reverse=True)
+
+
+def periodos_comparables(mes, ano, corte):
+    """((desde, hasta) del mes, (desde, hasta) del mes anterior) con los mismos días: si el mes es el del corte,
+    ambos llegan hasta el día del corte, para no comparar un mes a medias con uno completo."""
+    def ultimo_dia(m, a):
+        return (date(a + m // 12, m % 12 + 1, 1) - timedelta(days=1)).day
+
+    hasta = corte.day if (mes, ano) == (corte.month, corte.year) else ultimo_dia(mes, ano)
+    mes_ant, ano_ant = (mes - 1, ano) if mes > 1 else (12, ano - 1)
+    return ((date(ano, mes, 1), date(ano, mes, hasta)),
+            (date(ano_ant, mes_ant, 1), date(ano_ant, mes_ant, min(hasta, ultimo_dia(mes_ant, ano_ant)))))
 
 
 def ultimos_dias(corte, diarios, dias=7):

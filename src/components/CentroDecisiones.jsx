@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   LayoutDashboard, Clock, Truck, PackageCheck, AlertTriangle, Flame, AlertOctagon, RefreshCw, ArrowRight,
-  CheckCircle2, XCircle, Database, FileSpreadsheet, History,
+  Database,
 } from 'lucide-react';
 import Encabezado, { EstadoVacio } from './ui/Encabezado.jsx';
 import Boton from './ui/Boton.jsx';
@@ -9,11 +9,11 @@ import Aviso from './ui/Aviso.jsx';
 import PanelLateral from './ui/PanelLateral.jsx';
 import { AbcBadge } from './Badges.jsx';
 import WidgetVentas from './WidgetVentas.jsx';
-import { EVENTOS, fechaHora } from './traslados/estados.js';
+import HistorialMovimientos from './HistorialMovimientos.jsx';
+import { fechaHora } from './traslados/estados.js';
 import { obtenerCriticos, obtenerDashboard } from '../services/api.js';
 import { fechaLocal, usd } from '../utils/formato.js';
 
-const TIPOS_REPORTE = { ventas: 'Ventas', inv_fisico: 'Inventario sucursal', inv_inval: 'Inventario almacén', tasas: 'Tasas internas' };
 const fecha = (iso) => (iso ? fechaLocal(iso).toLocaleDateString('es-VE') : null);
 
 // Tarjeta de indicador: siempre lleva a los registros que la componen.
@@ -251,6 +251,8 @@ export default function CentroDecisiones({ usuario, sucursal, onSucursal, onIrTr
         <div className={`space-y-6 transition-opacity ${cargando ? 'opacity-60' : ''}`}>
           <EstadoDatos datos={datos.datos} sucursal={sucursal} onConfigurar={puedeCargar ? () => onIr('configuracion') : null} />
 
+          <WidgetVentas onVerDesglose={() => onIr('ventas')} />
+
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
             <Indicador
               icono={Clock}
@@ -310,8 +312,7 @@ export default function CentroDecisiones({ usuario, sucursal, onSucursal, onIrTr
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <div className="space-y-4 lg:col-span-2">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {!hayPendientes && <Aviso tono="exito" titulo="Nada requiere atención en esta vista" />}
 
               {datos.pendientes.por_aprobar.length > 0 && (
@@ -382,61 +383,9 @@ export default function CentroDecisiones({ usuario, sucursal, onSucursal, onIrTr
                   ))}
                 </Bloque>
               )}
-            </div>
-
-            <div className="space-y-4">
-              <Bloque titulo="Actividad reciente" icono={History}>
-                {datos.actividad.length === 0 && <p className="px-4 py-6 text-center text-sm text-slate-400">Sin movimientos todavía.</p>}
-                {datos.actividad.map((e) => (
-                  <button
-                    key={e.id}
-                    onClick={() => onAbrirTraslado(e.traslado.id)}
-                    className="block w-full px-4 py-2.5 text-left text-sm hover:bg-slate-50"
-                  >
-                    <p className="text-slate-900">
-                      <span className={e.tipo === 'rechazado' || e.tipo === 'recibido_con_diferencias' ? 'font-medium text-red-700' : 'font-medium'}>
-                        {EVENTOS[e.tipo] ?? e.tipo}
-                      </span>{' '}
-                      · <span className="font-mono text-xs">{e.traslado.folio}</span>
-                    </p>
-                    <p className="truncate text-xs text-slate-500">
-                      {e.traslado.origen} → {e.traslado.destino} · {articulosDe(e.traslado)}
-                    </p>
-                    <p className="text-[11px] text-slate-400">
-                      {e.usuario} · {fechaHora(e.fecha)}
-                    </p>
-                  </button>
-                ))}
-              </Bloque>
-
-              <Bloque titulo="Importaciones recientes" icono={FileSpreadsheet}>
-                {datos.importaciones.length === 0 && (
-                  <p className="px-4 py-6 text-center text-sm text-slate-400">Sin importaciones registradas.</p>
-                )}
-                {datos.importaciones.map((i) => (
-                  <div key={i.id} className="flex items-start gap-2 px-4 py-2.5 text-sm">
-                    {i.exito ? (
-                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-label="Correcta" />
-                    ) : (
-                      <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" aria-label="Con error" />
-                    )}
-                    <div className="min-w-0">
-                      <p className="text-slate-900">
-                        {TIPOS_REPORTE[i.tipo_reporte] ?? i.tipo_reporte}
-                        {i.sucursal && ` · ${i.sucursal}`}
-                      </p>
-                      <p className="truncate text-xs text-slate-500" title={i.mensaje}>
-                        {i.archivo} · {fechaHora(i.fecha_importacion)}
-                        {i.datos_hasta && ` · datos hasta ${fecha(i.datos_hasta)}`}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </Bloque>
-            </div>
           </div>
 
-          <WidgetVentas onVerDesglose={() => onIr('ventas')} />
+          <HistorialMovimientos eventos={datos.actividad} onAbrir={onAbrirTraslado} />
         </div>
       )}
 

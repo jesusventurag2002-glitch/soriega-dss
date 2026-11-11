@@ -19,8 +19,15 @@ def test_dashboard_cuenta_pendientes_y_criticos(cliente, datos_basicos):
     assert d['traslados']['por_aprobar'] == 1
     assert d['pendientes']['por_aprobar'][0]['folio'] == 'TR-00001'
     assert d['criticos']['items'][0]['traslado']['estado'] == 'pendiente_aprobacion'  # enlaza al traslado abierto
-    assert [a['tipo'] for a in d['actividad']] == ['enviado_aprobacion', 'creado']
+    assert d['actividad'] == []  # crear y enviar no mueven mercancía
+    assert 'importaciones' not in d
     assert d['capital_estancado'] is not None and d['capital_estancado']['consolidado'] is True
+
+    t = cliente.get(f"/api/traslados/{t['id']}", headers=GERENTE).get_json()['traslado']
+    cliente.post(f"/api/traslados/{t['id']}/acciones", json={'accion': 'rechazar', 'motivo': 'Sin transporte', 'version': t['version']},
+                 headers=GERENTE)
+    a = cliente.get('/api/dashboard', headers=GERENTE).get_json()['actividad']
+    assert [(x['tipo'], x['detalle']['comentario'], x['codigos']) for x in a] == [('rechazado', 'Sin transporte', ['A1'])]
 
     # Vista por sucursal: otra sucursal no ve los traslados ni los críticos de Barcelona.
     otra = cliente.get('/api/dashboard?sucursal=Maturín', headers=GERENTE).get_json()

@@ -47,6 +47,10 @@ class RepositorioVentasSQL:
         return ventas_con_tasa(func.coalesce(func.sum(VENTA_USD), 0), func.coalesce(func.sum(Venta.costo_real_usd), 0)
                                ).filter(*del_mes(mes, ano), filtro_excepciones(excluir)).one()
 
+    def facturado(self, desde, hasta, excluir):
+        return ventas_con_tasa(func.coalesce(func.sum(VENTA_USD), 0), func.coalesce(func.sum(Venta.factura_bs), 0)).filter(
+            Venta.fecha_emision.between(desde, hasta), filtro_excepciones(excluir)).one()
+
     def por_grupo_mes(self, mes, ano, excluir):
         return ventas_con_tasa(Venta.grupo_venta, func.sum(VENTA_USD)).filter(
             *del_mes(mes, ano), filtro_excepciones(excluir)).group_by(Venta.grupo_venta).order_by(func.sum(VENTA_USD).desc()).all()

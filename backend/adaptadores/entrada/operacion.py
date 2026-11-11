@@ -7,6 +7,7 @@ from aplicacion.operacion import CasosEstancado, CasosTablero, CasosTienda
 from dominio.comun import texto
 from dominio.errores import Conflicto, ErrorDominio
 from dominio.estancado import TIPOS_ACCION_ESTANCADO
+from dominio.traslados import lineas_vigentes
 
 
 def serializar_accion(a):
@@ -122,8 +123,9 @@ def crear_blueprint(estancado: CasosEstancado, tienda: CasosTienda, tablero: Cas
         datos = tablero.tablero(texto(request.args.get('sucursal')) or None)
         datos['pendientes'] = {k: [resumen_documento(d) for d in v] for k, v in datos['pendientes'].items()}
         datos['acciones_estancado']['items'] = [serializar_accion(a) for a in datos['acciones_estancado']['items']]
-        datos['actividad'] = [{**serializar_evento(e), 'traslado': resumen_documento(d)} for e, d in datos['actividad']]
-        datos['importaciones'] = [serializar_importacion(i) for i in datos['importaciones']]
+        # Los códigos permiten buscar el movimiento por artículo en el historial.
+        datos['actividad'] = [{**serializar_evento(e), 'traslado': resumen_documento(d),
+                               'codigos': [l.articulo_codigo for l in lineas_vigentes(d)]} for e, d in datos['actividad']]
         return jsonify(success=True, **datos)
 
     @bp.get('/api/importaciones')

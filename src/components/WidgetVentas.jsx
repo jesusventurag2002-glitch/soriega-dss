@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from 'recharts';
-import { ArrowRight, TrendingUp, XCircle } from 'lucide-react';
+import { ArrowRight, TrendingDown, TrendingUp, XCircle } from 'lucide-react';
 import { obtenerAnalisisVentas } from '../services/api.js';
-import { fechaLocal, nombreMes, usd } from '../utils/formato.js';
+import { bs, fechaLocal, nombreMes, usd } from '../utils/formato.js';
 
 const AZUL = '#2a78d6';
 
@@ -32,6 +32,8 @@ export default function WidgetVentas({ onVerDesglose }) {
   const serie = datos?.ultimos_7_dias.map((d) => ({ ...d, fecha: fechaLocal(d.fecha) })) ?? [];
   const total7Dias = serie.reduce((s, d) => s + d.total, 0);
   const corte = datos && fechaLocal(datos.fecha_corte);
+  const anterior = datos?.mes_anterior.total;
+  const variacion = anterior ? ((datos.total_mes - anterior) / anterior) * 100 : null;
 
   return (
     <section className="rounded-xl bg-white p-4 sm:p-5 ring-1 ring-slate-200">
@@ -47,6 +49,17 @@ export default function WidgetVentas({ onVerDesglose }) {
           ) : datos ? (
             <>
               <p className="mt-1 text-3xl font-bold tracking-tight text-slate-900">{usd(datos.total_mes, 0)}</p>
+              <p className="text-sm text-slate-600">{bs(datos.total_bs_mes, 0)}</p>
+              {variacion != null && (
+                <p
+                  className={`mt-1 inline-flex items-center gap-1 text-xs font-medium ${variacion >= 0 ? 'text-emerald-700' : 'text-red-700'}`}
+                  title={`Contra ${usd(anterior, 0)} del ${fechaLocal(datos.mes_anterior.desde).toLocaleDateString('es-VE')} al ${fechaLocal(datos.mes_anterior.hasta).toLocaleDateString('es-VE')}`}
+                >
+                  {variacion >= 0 ? <TrendingUp className="h-3.5 w-3.5" /> : <TrendingDown className="h-3.5 w-3.5" />}
+                  {variacion >= 0 ? '+' : ''}
+                  {variacion.toLocaleString('es-VE', { maximumFractionDigits: 1 })}% vs. mismos días del mes anterior
+                </p>
+              )}
               <p className="mt-0.5 text-xs text-slate-500">
                 {nombreMes(datos.mes, datos.ano)} · al {corte.toLocaleDateString('es-VE')} · {datos.sucursales.length}{' '}
                 {datos.sucursales.length === 1 ? 'sucursal' : 'sucursales'}
@@ -63,11 +76,11 @@ export default function WidgetVentas({ onVerDesglose }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between text-xs text-slate-500">
             <span className="inline-flex items-center gap-1">
-              <TrendingUp className="h-3.5 w-3.5 text-emerald-600" /> Últimos 7 días
+              Tendencia de la última semana
             </span>
             {datos && <span className="font-medium text-slate-700">{usd(total7Dias, 0)}</span>}
           </div>
-          <div className="mt-1 h-16">
+          <div className="mt-1 h-24">
             {datos && (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={serie} margin={{ top: 6, right: 6, bottom: 2, left: 6 }}>
